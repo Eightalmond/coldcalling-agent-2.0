@@ -1,0 +1,17 @@
+[project]
+name = "calle"
+version = "0.1.0"
+description = "CALL-E: a real-time AI sales voice agent built on Pipecat."
+authors = [
+    { name = "Eightalmond", email = "roshanrajiv04@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pipecat-ai[deepgram,groq,runner,silero,webrtc]>=1.12.0",
+    "python-dotenv>=1.2.4",
+    "tavily-python>=0.8.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
