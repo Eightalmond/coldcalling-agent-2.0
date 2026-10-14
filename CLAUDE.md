@@ -80,3 +80,6 @@ Work one step at a time; don't build ahead.
   Check the installed source under `.venv/lib/python3.12/site-packages/pipecat/` before trusting memory.
 - Importing `pipecat.runner.run` calls `load_dotenv(override=True)`, so when running the bot,
   `.env` values beat shell env vars. Set `PYTHON_DOTENV_DISABLED=1` to test with env vars only.
+- macOS python.org Python has no trusted root certs, so websockets fail with
+  `CERTIFICATE_VERIFY_FAILED`. `bot.py` sets `SSL_CERT_FILE` to `certifi.where()` (unless
+  already set) at the very top, before pipecat/aiohttp imports build their SSL context.

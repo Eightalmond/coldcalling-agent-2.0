@@ -11,6 +11,16 @@ runner finds your `bot()` function by looking at the `__main__` module.
 `-m` makes this file `__main__`; a console-script wrapper would not.
 """
 
+import os
+
+import certifi
+
+# python.org builds of Python on macOS ship without trusted root certs, so
+# Deepgram's websocket fails with CERTIFICATE_VERIFY_FAILED. Point OpenSSL at
+# certifi's CA bundle. This must run before the pipecat imports below:
+# aiohttp (used by pipecat) builds its SSL context once, at import time.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
 from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
