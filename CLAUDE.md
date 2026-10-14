@@ -23,14 +23,22 @@ any dependency that needs a paid account.**
 - `src/calle/` — the package
   - `config.py` — loads/validates `.env`
   - `bot.py` — pipeline wiring + Pipecat runner entry point (`bot()`); model/voice constants
-  - `prompts.py` — `SYSTEM_PROMPT` template (`{PRODUCT_BRIEF}` placeholder), greeting
-    instruction, fictional `DEMO_PRODUCT_BRIEF` (Quillo by Brightfern Labs)
+  - `prompts.py` — `SYSTEM_PROMPT` template (`{PRODUCT_BRIEF}` placeholder, brief wrapped
+    in `<product_brief>` as reference data), greeting instruction, `DEMO_BRIEF` fixture
+    (fictional Quillo by Brightfern Labs, in the standard 7-heading format)
+  - `knowledge.py` — Step 4: load material, optional Tavily web context, condense into a
+    validated brief with Groq (`build_brief`), `read_brief_file` for the bot
   - `metrics.py` — `TurnLatencyObserver`, per-turn latency logging (reused in later steps)
   - `log_redaction.py` — loguru patcher that hides API keys and the system prompt in logs
   - `llm_recovery.py` — `LLMErrorRecovery`: retry a failed LLM response once, then a spoken fallback
   - `filler.py` — `SlowResponseFiller`: "One moment." if no LLM text within `FILLER_DELAY_SECS`
   - `echo.py` — step-2 `EchoProcessor`; no longer in the pipeline, kept for reference
-- `scripts/` — runnable utilities (`smoke_test.py` checks every API key)
+- `scripts/` — runnable utilities (`smoke_test.py` checks every API key;
+  `make_brief.py` builds a brief from material)
+- `examples/quillo_material.md` — fake product sheet for testing, with deliberate gaps
+  (no discount info, no SOC 2 / compliance, no SLA, no contract terms)
+- `tests/` — offline pytest suite (fake LLM, no keys, no network)
+- `briefs/` — generated briefs (git-ignored: may contain client material)
 - `.env.example` — required + optional keys; real keys live in `.env` (git-ignored)
 
 ## Plan
@@ -41,6 +49,7 @@ any dependency that needs a paid account.**
    `.txt`/`.md`/`.pdf`); it's condensed into a structured product brief that is
    injected into the system prompt. No RAG for the MVP. Tavily web search is an
    optional enrichment toggle, available only when `TAVILY_API_KEY` is set.
+   ✅ *complete pending the owner's live test* (backend + CLI only; upload UI is Step 6)
 5. **Interruptions / turn-taking** — barge-in, natural turn ends
 6. **Web UI + guardrails** — call duration cap, rate limit, latency readout
 7. **Polish** — README, architecture diagram, demo video
@@ -57,6 +66,12 @@ Work one step at a time; don't build ahead.
 ## Commands
 - Install/sync: `uv sync`
 - Smoke test: `uv run python scripts/smoke_test.py`
+- Tests (offline): `uv run pytest`
+- Build a brief: `uv run python scripts/make_brief.py --name Quillo --company "Brightfern Labs"
+  --description "AI meeting notes" --file examples/quillo_material.md [--web]`
+  (or `--text "..."` instead of `--file`; `--out PATH` to override `briefs/<slug>.md`)
+- Run with a brief: `uv run python -m calle.bot --brief briefs/quillo.md`
+  (or `CALLE_BRIEF=briefs/quillo.md`; flag wins; neither = built-in `DEMO_BRIEF`)
 - Run the bot: `uv run python -m calle.bot`, then open http://localhost:7860 (allow the mic).
   Must be `-m calle.bot`: the Pipecat runner looks for `bot()` on the `__main__` module,
   so a `[project.scripts]` entry point won't work. Add `-v` for verbose logs.
@@ -95,6 +110,35 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
   delay, turn end, VAD stop -> first LLM token, first token -> first audio, and
   total (VAD stop -> first audio). Turns with an empty transcript log only a
   DEBUG "VAD blip" line.
+
+## Step 4: product knowledge
+```
+file/text -> load_material (.txt/.md/.pdf via pypdf; scanned PDF -> error)
+  -> limit_material (MAX_MATERIAL_CHARS = 24,000; truncate + warning, never silent)
+  -> [--web + TAVILY_API_KEY: Tavily basic search "<product> <company>", 3 results]
+  -> build_brief: one Groq request (BRIEF_MODEL = gpt-oss-120b, reasoning "medium";
+     may differ from the live model since it runs before the call)
+  -> validate_brief (7 exact `##` headings, <= BRIEF_MAX_CHARS = 3,000); 1 retry, then error
+  -> briefs/<slug>.md -> bot --brief -> build_system_prompt(brief)
+```
+- Brief headings: Overview, Key features, Pricing and plans, Ideal customer, Common
+  objections and answers, Competitors or alternatives, Not covered.
+- Condensing rules: facts only from the input; web-only facts end with "(web)"; never
+  invent prices/numbers/integrations/claims; unanswered buyer topics (discounts,
+  integrations, security/compliance, contract terms, free trial, support SLA) go under
+  "Not covered"; plain spoken-style sentences.
+- Prompt-injection defense: PRODUCT_INFO, MATERIAL and WEB_CONTEXT are wrapped in
+  `<<<NAME_START nonce>>>` / `<<<NAME_END nonce>>>` with a fresh random nonce per request
+  (a document can't forge the end marker), and the condensing model is told to treat them
+  as data and ignore instructions inside. The live prompt also wraps the brief in
+  `<product_brief>` and calls it reference data, not instructions.
+- Live-call rules: "Not covered" or unanswered -> "not sure, the team will follow up",
+  never guess; "(web)" facts phrased softly ("I believe...").
+- Never logged: API keys, the material, the brief text. The bot logs only the brief's
+  file name and length; `make_brief.py` prints only warnings, path and size.
+- Tests: `uv run pytest` (27 offline tests: each file type, scanned PDF, truncation
+  warning, heading validation + retry, LLM-error retry, web block labeling and the
+  no-key warning, injected instructions stay inside nonce delimiters).
 
 ## LLM model choice
 `openai/gpt-oss-20b` with `reasoning_effort="low"` (lowest Groq allows for gpt-oss;

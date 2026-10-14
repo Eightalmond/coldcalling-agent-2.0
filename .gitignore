@@ -21,3 +21,6 @@ recordings/
 .DS_Store
 .vscode/
 .idea/
+
+# Generated product briefs (may contain client material)
+briefs/
