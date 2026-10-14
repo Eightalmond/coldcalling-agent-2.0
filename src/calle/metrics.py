@@ -4,25 +4,36 @@
 between processors without being a stage in the pipeline, so it can't slow
 down or alter the audio path. Attach it with `PipelineWorker(observers=[...])`.
 
-What it measures, per user turn (all relative to the VAD "user stopped
-speaking" moment):
+Timeline of one turn (all times relative to the VAD "user stopped" moment):
 
-    user speaks ... silence ──► VAD stop ──► final transcript ──► first TTS audio
-                    └ vad_wait ┘           └──── stt_ms ─────┘
-                                           └────────────── response_ms ────────┘
+    speech ... silence ─► VAD stop ─► final transcript ─► turn end ─► first LLM token ─► first TTS audio
+              └vad_wait┘           └── stt ──────────┘
+                                   └── turn_end ─────────────────┘
+                                   └── first_token ───────────────────────────────┘
+                                                                                  └ token_to_audio ┘
+                                   └── total ──────────────────────────────────────────────────────┘
 
-`vad_wait` is real latency the user feels but no timer here can see: Silero
-must hear `stop_secs` of silence before it declares the turn over.
+- vad_wait: silence Silero must hear before it declares a stop. Real latency
+  the user feels, but it happens before our clock starts.
+- stt: signed; negative means Deepgram had the final transcript before the
+  VAD stop (the VAD was the bottleneck).
+- turn_end: when the user aggregator decided the turn was over (Smart Turn
+  model + waiting for the transcript). The LLM request starts here.
+- token_to_audio: TTS buffers LLM tokens into a full sentence before it
+  synthesizes, so this includes sentence aggregation, not just TTS speed.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from loguru import logger
 
 from pipecat.frames.frames import (
+    InterruptionFrame,
+    LLMFullResponseEndFrame,
+    LLMTextFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
-    TTSSpeakFrame,
+    UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -33,19 +44,46 @@ NS_PER_MS = 1_000_000
 
 @dataclass(frozen=True)
 class TurnMetrics:
-    """Timings and text for one completed user -> bot exchange."""
+    """Timings (ms) and text for one completed user -> bot exchange.
+
+    Timings are None when the moment never happened, e.g. the user
+    interrupted before any audio was produced.
+    """
 
     user_text: str
     bot_text: str
+    interrupted: bool
     vad_wait_ms: float
-    # Signed: negative means Deepgram had the final transcript *before* the
-    # VAD declared the stop, i.e. the VAD was the bottleneck, not STT.
     stt_ms: float | None
-    response_ms: float
+    turn_end_ms: float | None
+    first_token_ms: float | None
+    token_to_audio_ms: float | None
+    total_ms: float | None
+
+
+@dataclass
+class _OpenTurn:
+    """Mutable bookkeeping for a turn waiting on the bot's response."""
+
+    user_text: str
+    vad_stop_at: int | None  # all timestamps: pipeline-clock ns
+    vad_wait_secs: float
+    stt_at: int | None
+    turn_end_at: int
+    first_token_at: int | None = None
+    first_audio_at: int | None = None
+    llm_done: bool = False
+    bot_parts: list[str] = field(default_factory=list)
+
+
+def _ms_between(start: int | None, end: int | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return (end - start) / NS_PER_MS
 
 
 class TurnLatencyObserver(BaseObserver):
-    """Logs one summary line per turn and emits an `on_turn_metrics` event.
+    """Logs one summary block per turn and emits an `on_turn_metrics` event.
 
     Subscribe from other code (e.g. the step-6 web UI latency readout) with:
 
@@ -58,62 +96,115 @@ class TurnLatencyObserver(BaseObserver):
         # want the moment it was *created*, so observe first pushes only.
         super().__init__(observe_every_push=False)
         self._register_event_handler("on_turn_metrics")
-        self._reset()
-
-    def _reset(self) -> None:
-        self._stopped_at: int | None = None  # pipeline-clock ns
+        # Collected while the user is talking:
+        self._vad_stop_at: int | None = None
         self._vad_wait_secs = 0.0
-        self._transcript_at: int | None = None
+        self._stt_at: int | None = None
         self._user_parts: list[str] = []
-        self._bot_parts: list[str] = []
+        # Set once the user's turn has ended and we're timing the response:
+        self._turn: _OpenTurn | None = None
 
     async def on_push_frame(self, data: FramePushed) -> None:
-        frame = data.frame
+        frame, now = data.frame, data.timestamp
+
+        # SystemFrames like these are broadcast both up- and downstream;
+        # count each event once by only looking at the downstream copy.
+        if data.direction != FrameDirection.DOWNSTREAM:
+            return
 
         if isinstance(frame, VADUserStoppedSpeakingFrame):
-            # The VAD broadcasts this both up- and downstream; count it once.
             # If the user pauses and resumes, the latest stop wins.
-            if data.direction == FrameDirection.DOWNSTREAM:
-                self._stopped_at = data.timestamp
-                self._vad_wait_secs = frame.stop_secs
+            self._vad_stop_at = now
+            self._vad_wait_secs = frame.stop_secs
 
         elif isinstance(frame, TranscriptionFrame):
-            self._user_parts.append(frame.text)
-            self._transcript_at = data.timestamp
+            self._user_parts.append(frame.text.strip())
+            self._stt_at = now
 
-        elif isinstance(frame, TTSSpeakFrame):
-            self._bot_parts.append(frame.text)
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            await self._on_user_turn_end(now)
 
-        elif isinstance(frame, TTSAudioRawFrame) and self._stopped_at is not None:
-            # First audio chunk since the user stopped: the turn is answered.
-            await self._finish_turn(first_audio_at=data.timestamp)
+        elif self._turn is None:
+            return  # e.g. the bot's greeting: not a response to a user turn
 
-    async def _finish_turn(self, first_audio_at: int) -> None:
-        assert self._stopped_at is not None
-        stt_ms = None
-        if self._transcript_at is not None:
-            stt_ms = (self._transcript_at - self._stopped_at) / NS_PER_MS
+        elif isinstance(frame, LLMTextFrame):
+            if self._turn.first_token_at is None:
+                self._turn.first_token_at = now
+            self._turn.bot_parts.append(frame.text)
 
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._turn.llm_done = True
+            await self._maybe_finish()
+
+        elif isinstance(frame, TTSAudioRawFrame):
+            if self._turn.first_audio_at is None:
+                self._turn.first_audio_at = now
+                await self._maybe_finish()
+
+        elif isinstance(frame, InterruptionFrame):
+            await self._finish(interrupted=True)
+
+    async def _on_user_turn_end(self, now: int) -> None:
+        user_text = " ".join(part for part in self._user_parts if part)
+        if not user_text:
+            # VAD heard something (a cough, a click, background noise) but
+            # STT found no words. Not a real turn.
+            logger.debug("VAD blip: user turn ended with an empty transcript; not logged")
+        else:
+            if self._turn is not None:  # previous response never completed
+                await self._finish(interrupted=True)
+            self._turn = _OpenTurn(
+                user_text=user_text,
+                vad_stop_at=self._vad_stop_at,
+                vad_wait_secs=self._vad_wait_secs,
+                stt_at=self._stt_at,
+                turn_end_at=now,
+            )
+        self._vad_stop_at = self._stt_at = None
+        self._user_parts = []
+
+    async def _maybe_finish(self) -> None:
+        # Log once the bot's full text is known AND its first audio went out;
+        # these can arrive in either order.
+        if self._turn and self._turn.llm_done and self._turn.first_audio_at is not None:
+            await self._finish(interrupted=False)
+
+    async def _finish(self, *, interrupted: bool) -> None:
+        turn, self._turn = self._turn, None
+        if turn is None:
+            return
         metrics = TurnMetrics(
-            user_text=" ".join(self._user_parts),
-            bot_text=" ".join(self._bot_parts),
-            vad_wait_ms=self._vad_wait_secs * 1000,
-            stt_ms=stt_ms,
-            response_ms=(first_audio_at - self._stopped_at) / NS_PER_MS,
+            user_text=turn.user_text,
+            bot_text="".join(turn.bot_parts).strip(),
+            interrupted=interrupted,
+            vad_wait_ms=turn.vad_wait_secs * 1000,
+            stt_ms=_ms_between(turn.vad_stop_at, turn.stt_at),
+            turn_end_ms=_ms_between(turn.vad_stop_at, turn.turn_end_at),
+            first_token_ms=_ms_between(turn.vad_stop_at, turn.first_token_at),
+            token_to_audio_ms=_ms_between(turn.first_token_at, turn.first_audio_at),
+            total_ms=_ms_between(turn.vad_stop_at, turn.first_audio_at),
         )
-        self._reset()
-
         log_turn(metrics)
         await self._call_event_handler("on_turn_metrics", metrics)
 
 
+def _fmt(ms: float | None, signed: bool = False) -> str:
+    if ms is None:
+        return "n/a"
+    # Round first so -0.3 prints as "+0", not "-0".
+    return f"{round(ms):+d} ms" if signed else f"{round(ms)} ms"
+
+
 def log_turn(metrics: TurnMetrics) -> None:
     """Print a compact, readable block for one turn."""
-    stt = "n/a" if metrics.stt_ms is None else f"{metrics.stt_ms:+.0f} ms"
+    status = " (interrupted)" if metrics.interrupted else ""
     logger.info(
-        "\n── turn ─────────────────────────────\n"
+        f"\n── turn{status} ─────────────────────────────\n"
         f"  user : {metrics.user_text!r}\n"
         f"  bot  : {metrics.bot_text!r}\n"
-        f"  vad wait {metrics.vad_wait_ms:.0f} ms | stt {stt} | "
-        f"response {metrics.response_ms:.0f} ms (VAD stop -> first audio)"
+        f"  vad wait {_fmt(metrics.vad_wait_ms)} | stt {_fmt(metrics.stt_ms, signed=True)}"
+        f" | turn end {_fmt(metrics.turn_end_ms, signed=True)}\n"
+        f"  VAD stop -> first token {_fmt(metrics.first_token_ms)}"
+        f" | first token -> first audio {_fmt(metrics.token_to_audio_ms)}"
+        f" | total {_fmt(metrics.total_ms)}"
     )

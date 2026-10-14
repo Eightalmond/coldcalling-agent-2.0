@@ -22,16 +22,19 @@ any dependency that needs a paid account.**
 ## Layout
 - `src/calle/` — the package
   - `config.py` — loads/validates `.env`
-  - `bot.py` — pipeline wiring + Pipecat runner entry point (`bot()`)
-  - `echo.py` — `EchoProcessor`, the step-2 stand-in for the LLM
+  - `bot.py` — pipeline wiring + Pipecat runner entry point (`bot()`); model/voice constants
+  - `prompts.py` — `SYSTEM_PROMPT` template (`{PRODUCT_BRIEF}` placeholder), greeting
+    instruction, fictional `DEMO_PRODUCT_BRIEF` (Quillo by Brightfern Labs)
   - `metrics.py` — `TurnLatencyObserver`, per-turn latency logging (reused in later steps)
+  - `log_redaction.py` — loguru patcher that hides API keys and the system prompt in logs
+  - `echo.py` — step-2 `EchoProcessor`; no longer in the pipeline, kept for reference
 - `scripts/` — runnable utilities (`smoke_test.py` checks every API key)
 - `.env.example` — required + optional keys; real keys live in `.env` (git-ignored)
 
 ## Plan
 1. **Setup** — uv project, dependencies, config loading, smoke test ✅
 2. **STT + TTS echo bot** — hear the user, say it back ✅
-3. **LLM sales persona** — Groq-powered salesperson
+3. **LLM sales persona** — Groq-powered salesperson 🚧 *in progress*
 4. **Product knowledge** — the user provides material (pasted text or uploaded
    `.txt`/`.md`/`.pdf`); it's condensed into a structured product brief that is
    injected into the system prompt. No RAG for the MVP. Tavily web search is an
@@ -57,7 +60,11 @@ Work one step at a time; don't build ahead.
   so a `[project.scripts]` entry point won't work. Add `-v` for verbose logs.
 
 ## How the pipeline works
-`transport.input() -> VADProcessor(Silero) -> DeepgramSTTService -> EchoProcessor -> DeepgramTTSService -> transport.output()`
+```
+transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
+  -> user aggregator -> GroqLLMService -> DeepgramTTSService
+  -> transport.output() -> assistant aggregator
+```
 
 - Everything is a **frame** flowing downstream through processors. Audio in is
   `InputAudioRawFrame`; audio out is `TTSAudioRawFrame`.
@@ -66,13 +73,33 @@ Work one step at a time; don't build ahead.
   service sends a `Finalize` on "stopped", which flushes the last words fast.
 - **STT** emits `InterimTranscriptionFrame`s while you talk and `TranscriptionFrame`s
   for final text. Deepgram can emit several finals per utterance.
-- **EchoProcessor** buffers finals and, once the user has stopped, pushes one
-  `TTSSpeakFrame`. Step 3 replaces it with the LLM.
-- **TTS** turns text into audio frames; the output transport streams them to the browser.
+- **User aggregator** (`LLMContextAggregatorPair(context).user()`) decides when the
+  turn is over (default stop strategy: bundled Smart Turn v3.2 ONNX model + a final
+  transcript), broadcasts `UserStoppedSpeakingFrame`, appends the user message to the
+  `LLMContext` and pushes an `LLMContextFrame`. On user speech it broadcasts an
+  `InterruptionFrame`, so basic barge-in already works. It gets no `vad_analyzer`:
+  it reuses the VAD frames from our `VADProcessor` instead of running Silero twice.
+- **LLM** (`GroqLLMService`) streams `LLMFullResponseStartFrame`, `LLMTextFrame`s,
+  `LLMFullResponseEndFrame`. The system prompt is passed as
+  `Settings(system_instruction=...)`, not as a context message.
+- **TTS** aggregates LLM tokens into sentences, then emits `TTSAudioRawFrame`s; the
+  output transport streams them to the browser.
+- **Assistant aggregator** sits *after* the output so the context records only what
+  was actually spoken (an interrupted reply is truncated).
+- **Greeting**: on RTVI `on_client_ready` (client ready to play audio, later than
+  `on_client_connected`), add a `developer` message and queue an `LLMRunFrame`.
 - **Observers** (`TurnLatencyObserver`) watch frames from outside the pipeline, so
-  measuring never adds latency. Per turn it logs: user text, bot text, VAD wait,
-  STT delay (signed; negative = transcript was ready before the VAD stop) and
-  response time (VAD stop -> first TTS audio frame).
+  measuring never adds latency. Per turn it logs user text, bot text, VAD wait, STT
+  delay, turn end, VAD stop -> first LLM token, first token -> first audio, and
+  total (VAD stop -> first audio). Turns with an empty transcript log only a
+  DEBUG "VAD blip" line.
+
+## LLM model choice
+`openai/gpt-oss-20b` with `reasoning_effort="low"` (lowest Groq allows for gpt-oss;
+reasoning text is returned separately and never spoken, but it still delays the
+first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-sales;
+`qwen/qwen3.8-27b` (preview) accepts `reasoning_effort="none"`. Compare on the
+"VAD stop -> first token" metric before switching.
 
 ## Gotchas
 - Since Pipecat 1.3, `PipelineTask`/`PipelineRunner` are deprecated aliases; use `PipelineWorker`/`WorkerRunner`,
@@ -83,3 +110,6 @@ Work one step at a time; don't build ahead.
 - macOS python.org Python has no trusted root certs, so websockets fail with
   `CERTIFICATE_VERIFY_FAILED`. `bot.py` sets `SSL_CERT_FILE` to `certifi.where()` (unless
   already set) at the very top, before pipecat/aiohttp imports build their SSL context.
+- Pipecat's DEBUG logs print the LLM `system_instruction` and, on every LLM call, the
+  full context messages. Keep the system prompt out of the context and keep
+  `install_log_redaction()` installed so it never appears in logs.
