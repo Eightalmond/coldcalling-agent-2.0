@@ -48,6 +48,8 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from calle.config import ConfigError, load_settings
+from calle.filler import SlowResponseFiller
+from calle.llm_recovery import LLMErrorRecovery
 from calle.log_redaction import install_log_redaction
 from calle.metrics import TurnLatencyObserver
 from calle.prompts import GREETING_INSTRUCTION, build_system_prompt
@@ -69,6 +71,10 @@ LLM_REASONING_EFFORT = "low"
 # Lower = less dead air after a trailing "um..."; too low cuts off callers
 # who pause to think mid-sentence.
 SMART_TURN_STOP_SECS = 1.5
+
+# If the LLM hasn't produced any text this long after the user's turn ends,
+# say a short filler ("One moment.") so the caller isn't left in silence.
+FILLER_DELAY_SECS = 1.5
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
@@ -126,6 +132,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             stt,
             aggregators.user(),  # decides turn end; adds user text to context
             llm,
+            # Retry a failed response once, then speak a fallback line.
+            LLMErrorRecovery(llm, context),
+            # "One moment." if the LLM is slow; never stored in context.
+            SlowResponseFiller(FILLER_DELAY_SECS),
             tts,
             transport.output(),  # bot audio back to the browser
             # After output, so the context records only what was actually

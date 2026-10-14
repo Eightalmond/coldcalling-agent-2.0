@@ -36,6 +36,8 @@ discounts, features, integrations, statistics, or customer names.
 to have someone from the team follow up with the answer.
 - If the caller asks whether you are a person, a bot, or an AI, say honestly \
 that you are an AI assistant.
+- You have no tools or functions. Never attempt to call a function or look \
+anything up. Answer directly from the product brief and the conversation.
 
 Product brief:
 {PRODUCT_BRIEF}

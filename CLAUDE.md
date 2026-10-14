@@ -27,6 +27,8 @@ any dependency that needs a paid account.**
     instruction, fictional `DEMO_PRODUCT_BRIEF` (Quillo by Brightfern Labs)
   - `metrics.py` — `TurnLatencyObserver`, per-turn latency logging (reused in later steps)
   - `log_redaction.py` — loguru patcher that hides API keys and the system prompt in logs
+  - `llm_recovery.py` — `LLMErrorRecovery`: retry a failed LLM response once, then a spoken fallback
+  - `filler.py` — `SlowResponseFiller`: "One moment." if no LLM text within `FILLER_DELAY_SECS`
   - `echo.py` — step-2 `EchoProcessor`; no longer in the pipeline, kept for reference
 - `scripts/` — runnable utilities (`smoke_test.py` checks every API key)
 - `.env.example` — required + optional keys; real keys live in `.env` (git-ignored)
@@ -62,8 +64,8 @@ Work one step at a time; don't build ahead.
 ## How the pipeline works
 ```
 transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
-  -> user aggregator -> GroqLLMService -> DeepgramTTSService
-  -> transport.output() -> assistant aggregator
+  -> user aggregator -> GroqLLMService -> LLMErrorRecovery -> SlowResponseFiller
+  -> DeepgramTTSService -> transport.output() -> assistant aggregator
 ```
 
 - Everything is a **frame** flowing downstream through processors. Audio in is
@@ -106,6 +108,35 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
 - Groq TTFB: about 0.5 s (Pipecat's own LLM TTFB metric, `-v` logs).
 - Smart Turn silence fallback (`SMART_TURN_STOP_SECS`, i.e. `SmartTurnParams.stop_secs`)
   lowered from Pipecat's default 3 s to 1.5 s; re-measure "turn end" after this change.
+
+## Known issue: gpt-oss "Tool choice is none, but model called a tool"
+- **Symptom:** on some turns (seen on a pricing question) gpt-oss-20b emits a tool call
+  although no tools are defined. Groq rejects it with HTTP 400 (`tool_use_failed`),
+  Pipecat logs a non-fatal ErrorFrame, and the bot went silent ~13 s until the caller
+  said "Hello?". Pipecat also files every HTTP 400 as a *permanent* `INVALID_REQUEST`
+  and flags the LLM unusable (harmless with the default `ProcessorUnusablePolicy.CONTINUE`,
+  but misleading).
+- **Fix:**
+  1. Prompt rule: no tools; never try to call a function or look anything up.
+  2. `LLMErrorRecovery` (after the LLM) listens to `llm`'s `on_error` event, re-marks the
+     LLM usable, and when the failed response's `LLMFullResponseEndFrame` passes, either
+     retries once by pushing the same `LLMContextFrame` upstream (what the assistant
+     aggregator does for `LLMRunFrame`) or, on a second failure, speaks
+     "Sorry, I lost my train of thought. Could you say that again?". A failed attempt
+     adds nothing to context (empty aggregation), a retry reuses the same context (no
+     duplicate user message), and the fallback is stored as an assistant message on
+     purpose (the caller heard it). No retry if part of the reply was already spoken.
+  3. `SlowResponseFiller` speaks a varied filler after `FILLER_DELAY_SECS` (1.5 s) with
+     no LLM text; cancelled by LLM text, user speech, or interruption; one per user turn;
+     never on the greeting. Sent with `append_to_context=False`, so it is not stored in
+     context. Deepgram TTS pauses its input while the filler plays, so an answer that
+     arrives mid-filler starts right after it.
+  4. Metrics: each failure logs a WARNING `LLM error (retrying|speaking fallback) |
+     errors=N retries=N fallbacks=N | <error text>` (truncated, never the prompt). Turn
+     logs show `filler at X ms`; filler audio is excluded from first-audio timing.
+- **If errors stay frequent:** try `qwen/qwen3.8-27b` with `reasoning_effort="none"`
+  (non-reasoning, so also lower first-token latency; it's a preview model). Compare
+  the `errors=` counter and "VAD stop -> first token" before switching.
 
 ## Open issues
 - **Interrupted replies in context (sentence granularity).** Deepgram TTS has no word
