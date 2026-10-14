@@ -24,12 +24,17 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 from loguru import logger
 
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
 from pipecat.runner.types import RunnerArguments
@@ -38,6 +43,8 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.groq.llm import GroqLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from calle.config import ConfigError, load_settings
@@ -55,6 +62,13 @@ STT_MODEL = "nova-3-general"
 # The reasoning text arrives in a separate field that Pipecat doesn't speak.
 LLM_MODEL = "openai/gpt-oss-20b"
 LLM_REASONING_EFFORT = "low"
+
+# Smart Turn's silence fallback (SmartTurnParams.stop_secs, Pipecat default 3).
+# When the model keeps judging the user "not finished", the turn still ends
+# after this much silence ("End of Turn complete due to stop_secs" in the log).
+# Lower = less dead air after a trailing "um..."; too low cuts off callers
+# who pause to think mid-sentence.
+SMART_TURN_STOP_SECS = 1.5
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
@@ -87,9 +101,20 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     context = LLMContext()
     # No vad_analyzer here: our VADProcessor upstream already emits VAD frames,
     # and the aggregator's turn logic consumes those. Passing one would run a
-    # second Silero model. With default params the aggregator ends a turn with
-    # the bundled Smart Turn v3 model and interrupts the bot on user speech.
-    aggregators = LLMContextAggregatorPair(context)
+    # second Silero model. Turn start stays at the defaults (VAD/transcript,
+    # which also interrupt the bot); turn stop uses the bundled Smart Turn v3
+    # model, same as the default but with a shorter silence fallback.
+    turn_analyzer = LocalSmartTurnAnalyzerV3(
+        params=SmartTurnParams(stop_secs=SMART_TURN_STOP_SECS)
+    )
+    aggregators = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            user_turn_strategies=UserTurnStrategies(
+                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=turn_analyzer)]
+            ),
+        ),
+    )
 
     pipeline = Pipeline(
         [

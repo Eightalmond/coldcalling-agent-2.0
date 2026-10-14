@@ -101,6 +101,26 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
 `qwen/qwen3.8-27b` (preview) accepts `reasoning_effort="none"`. Compare on the
 "VAD stop -> first token" metric before switching.
 
+## Step 3 baseline (measured on real calls)
+- VAD stop -> first audio: about 1.1 to 1.3 s on normal turns.
+- Groq TTFB: about 0.5 s (Pipecat's own LLM TTFB metric, `-v` logs).
+- Smart Turn silence fallback (`SMART_TURN_STOP_SECS`, i.e. `SmartTurnParams.stop_secs`)
+  lowered from Pipecat's default 3 s to 1.5 s; re-measure "turn end" after this change.
+
+## Open issues
+- **Interrupted replies in context (sentence granularity).** Deepgram TTS has no word
+  timestamps (Aura's websocket only sends audio, Metadata, Flushed, Cleared, Warning), so
+  Pipecat emits one `TTSTextFrame` per sentence, queued *behind* that sentence's audio in
+  the output transport. The assistant aggregator (after `transport.output()`) only sees
+  sentences whose audio was fully played; on interruption the output queue is cleared and
+  `_trigger_assistant_turn_stopped(interrupted=True)` writes what arrived so far. Result:
+  the context holds fully spoken sentences only; a half-spoken sentence is dropped
+  entirely, so the LLM doesn't know it said part of it. Not changed yet.
+- **`go on` / `hold on` handling** is prompt-only for now; Step 5 may need real
+  turn-taking logic (e.g. not answering "hold on" at all).
+- **Greeting `developer` role** on Groq is unverified against Groq's docs (Pipecat
+  treats Groq as supporting it); switch to `user` if it ever returns HTTP 400.
+
 ## Gotchas
 - Since Pipecat 1.3, `PipelineTask`/`PipelineRunner` are deprecated aliases; use `PipelineWorker`/`WorkerRunner`,
   and service options go through `Service.Settings(...)`, not constructor kwargs.
