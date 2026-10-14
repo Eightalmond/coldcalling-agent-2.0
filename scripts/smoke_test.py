@@ -2,7 +2,8 @@
 
 Run with:  uv run python scripts/smoke_test.py
 
-Prints PASS/FAIL per service and exits non-zero if anything fails.
+Prints PASS/FAIL/SKIPPED per service and exits non-zero if anything fails.
+Optional services (Tavily) are SKIPPED, not failed, when their key is absent.
 API keys are never printed; they're scrubbed from any error text too.
 """
 
@@ -19,6 +20,10 @@ from calle.config import ConfigError, Settings, load_settings
 DEEPGRAM_TTS_MODEL = "aura-2-thalia-en"
 DEEPGRAM_STT_MODEL = "nova-3"
 GROQ_MODEL = "openai/gpt-oss-20b"
+
+
+class Skipped(Exception):
+    """Raised by a check whose optional service isn't configured."""
 
 
 def check_deepgram(settings: Settings) -> str:
@@ -63,6 +68,8 @@ def check_groq(settings: Settings) -> str:
 
 
 def check_tavily(settings: Settings) -> str:
+    if not settings.tavily_api_key:
+        raise Skipped("TAVILY_API_KEY not set (web enrichment is optional)")
     client = TavilyClient(api_key=settings.tavily_api_key)
     # "basic" depth costs 1 credit (vs 2 for "advanced") on the free plan.
     result = client.search("Pipecat voice AI framework", search_depth="basic", max_results=1)
@@ -105,17 +112,22 @@ def main() -> int:
         print(f"Config error: {error}")
         return 1
 
-    failures = 0
+    failures = skipped = 0
     for name, check in CHECKS.items():
         try:
             detail = check(settings)
-            print(f"PASS  {name:<9} {detail}")
+            print(f"PASS     {name:<9} {detail}")
+        except Skipped as reason:
+            skipped += 1
+            print(f"SKIPPED  {name:<9} {reason}")
         except Exception as error:  # report every service, don't stop at the first failure
             failures += 1
             message = redact(describe(error), settings.secrets())
-            print(f"FAIL  {name:<9} {message}")
+            print(f"FAIL     {name:<9} {message}")
 
-    print(f"\n{len(CHECKS) - failures}/{len(CHECKS)} services OK")
+    ran = len(CHECKS) - skipped
+    summary = f"\n{ran - failures}/{ran} services OK"
+    print(summary + (f" ({skipped} skipped)" if skipped else ""))
     return 1 if failures else 0
 
 

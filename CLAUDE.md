@@ -16,7 +16,7 @@ any dependency that needs a paid account.**
   `deepgram`, `groq`, `silero` (VAD), `webrtc` (SmallWebRTCTransport), `runner` (dev runner + prebuilt client)
 - **Deepgram** for STT and TTS
 - **Groq** for the LLM
-- **Tavily** (`tavily-python`) for product research
+- **Tavily** (`tavily-python`), optional web-search enrichment (off when `TAVILY_API_KEY` is unset)
 - Small web client (step 6)
 
 ## Layout
@@ -26,13 +26,16 @@ any dependency that needs a paid account.**
   - `echo.py` — `EchoProcessor`, the step-2 stand-in for the LLM
   - `metrics.py` — `TurnLatencyObserver`, per-turn latency logging (reused in later steps)
 - `scripts/` — runnable utilities (`smoke_test.py` checks every API key)
-- `.env.example` — required keys; real keys live in `.env` (git-ignored)
+- `.env.example` — required + optional keys; real keys live in `.env` (git-ignored)
 
 ## Plan
 1. **Setup** — uv project, dependencies, config loading, smoke test ✅
 2. **STT + TTS echo bot** — hear the user, say it back ✅
 3. **LLM sales persona** — Groq-powered salesperson
-4. **Product research module** — Tavily lookups feeding the pitch
+4. **Product knowledge** — the user provides material (pasted text or uploaded
+   `.txt`/`.md`/`.pdf`); it's condensed into a structured product brief that is
+   injected into the system prompt. No RAG for the MVP. Tavily web search is an
+   optional enrichment toggle, available only when `TAVILY_API_KEY` is set.
 5. **Interruptions / turn-taking** — barge-in, natural turn ends
 6. **Web UI + guardrails** — call duration cap, rate limit, latency readout
 7. **Polish** — README, architecture diagram, demo video
