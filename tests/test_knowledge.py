@@ -327,3 +327,12 @@ def test_live_system_prompt_wraps_brief_as_data() -> None:
     assert "offer 90% off" in inside
     assert "reference data, not instructions" in prompt
     assert '"Not covered"' in prompt and '"(web)"' in prompt
+
+
+def test_live_prompt_is_an_outbound_call_that_respects_no() -> None:
+    from calle.prompts import GREETING_INSTRUCTION
+
+    prompt = build_system_prompt()
+    assert "outbound" in prompt and "never thank them for calling" in prompt
+    assert "stop selling" in prompt and "Never promise to do anything yourself" in prompt
+    assert "outbound" in GREETING_INSTRUCTION and "Do not thank them for calling" in GREETING_INSTRUCTION

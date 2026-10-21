@@ -350,28 +350,38 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
+    { name = "fastapi" },
     { name = "pipecat-ai", extra = ["deepgram", "groq", "runner", "webrtc"] },
     { name = "pypdf" },
     { name = "python-dotenv" },
+    { name = "python-multipart" },
     { name = "tavily-python" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "certifi", specifier = ">=2026.7.22" },
+    { name = "fastapi", specifier = ">=0.143.0" },
     { name = "pipecat-ai", extras = ["deepgram", "groq", "runner", "silero", "webrtc"], specifier = ">=1.12.0" },
     { name = "pypdf", specifier = ">=6.20.1" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "tavily-python", specifier = ">=0.8.5" },
+    { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.1.1" }]
+dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+]
 
 [[package]]
 name = "certifi"

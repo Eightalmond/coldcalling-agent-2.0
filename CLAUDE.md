@@ -35,7 +35,13 @@ any dependency that needs a paid account.**
     (skipped while the caller asked to hold)
   - `turn_taking.py` — Step 5: `InterruptPhraseStartStrategy` (backchannel-proof barge-in)
     and `CallPacing` ("hold on" handling, idle check-ins, goodbye)
+  - `server.py` — Step 6: our FastAPI server (API + WebRTC signalling + serves the built UI)
+  - `guardrails.py` — rate limits (`SlidingWindowLimiter`) and `CallRegistry` (one-time call ids,
+    concurrency cap); `call_timer.py` — `CallTimer`, spoken wrap-up + end at the call cap
   - `echo.py` — step-2 `EchoProcessor`; no longer in the pipeline, kept for reference
+- `client/` — Step 6 web client (Vite + vanilla TypeScript, `@pipecat-ai/client-js` 1.14.0 +
+  `@pipecat-ai/small-webrtc-transport` 1.11.0, pinned). `src/api.ts` (server API),
+  `src/call.ts` (one call: PipecatClient wrapper), `src/main.ts` (UI), `src/style.css`
 - `scripts/` — runnable utilities (`smoke_test.py` checks every API key;
   `make_brief.py` builds a brief from material)
 - `examples/quillo_material.md` — fake product sheet for testing, with deliberate gaps
@@ -54,7 +60,7 @@ any dependency that needs a paid account.**
    optional enrichment toggle, available only when `TAVILY_API_KEY` is set.
    ✅ live-tested 2026-10-21 (backend + CLI only; upload UI is Step 6)
 5. **Interruptions / turn-taking** — barge-in, natural turn ends 🚧 *built, pending live test*
-6. **Web UI + guardrails** — call duration cap, rate limit, latency readout
+6. **Web UI + guardrails** — call duration cap, rate limit, latency readout 🚧 *built locally, pending live test; deploy is a follow-up*
 7. **Polish** — README, architecture diagram, demo video
 
 Work one step at a time; don't build ahead.
@@ -78,6 +84,11 @@ Work one step at a time; don't build ahead.
 - Run the bot: `uv run python -m calle.bot`, then open http://localhost:7860 (allow the mic).
   Must be `-m calle.bot`: the Pipecat runner looks for `bot()` on the `__main__` module,
   so a `[project.scripts]` entry point won't work. Add `-v` for verbose logs.
+  (This is Pipecat's dev runner + playground; the Step 6 web app is below.)
+- Web app (Step 6): `cd client && npm install && npm run build`, then
+  `uv run python -m calle.server` and open http://localhost:7860 (one process serves UI + API).
+  Client dev with hot reload: run the server, then `cd client && npm run dev` (http://localhost:5173,
+  Vite proxies `/api` to :7860).
 
 ## How the pipeline works
 ```
@@ -116,6 +127,44 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
   total (VAD stop -> first audio). Turns with an empty transcript log only a
   DEBUG "VAD blip" line. A turn started by a transcript alone (no VAD stop of its
   own) is timed from "turn end" instead, and the log line says so.
+
+## Step 6: web UI and guardrails (local; deploy later)
+- **Deployment plan (decided, not done):** static client on Vercel; Python server on Hugging Face
+  Spaces (Docker, free CPU Basic); WebRTC media via Cloudflare TURN (1,000 GB/month free) with
+  `CALLE_ICE_SERVERS`. Vercel can't host the bot (Python WebSocket functions are beta and cut at
+  the function duration; no UDP for WebRTC; heavy ONNX deps). Fallback if TURN is a problem:
+  Pipecat's WebSocket transport (works anywhere, worse for audio).
+- **Server (`calle.server`)** replaces the dev runner for the web app. Routes:
+  `GET /api/config`, `GET /api/demo-brief`, `POST /api/briefs` (multipart: product fields + file
+  or text, `use_web`; runs `build_brief` in a threadpool), `POST /api/calls` (validates the brief,
+  checks limits, returns a one-time `call_id`), `POST/PATCH /api/offer` (WebRTC signalling; an
+  offer must carry a fresh `call_id` in `requestData`, otherwise 403 before any WebRTC work).
+  Serves `client/dist` at `/` when built. `create_app()` takes injectable LLM, web search,
+  call runner, registry and WebRTC handler, so tests run without keys or WebRTC.
+- **Guardrails** (`guardrails.py`, all in memory, reset on restart): `CALL_MAX_SECS` = 300
+  (CallTimer: wrap-up line + `EndFrame`, hard cancel 30 s later), 3 calls per visitor per hour,
+  30 calls per day overall, 5 brief generations per visitor per hour, 2 concurrent calls, call ids
+  expire if not connected within 60 s, 5 MB upload cap. Visitor = client IP
+  (`CALLE_TRUST_PROXY=1` to use `X-Forwarded-For` behind a proxy). 429s include `Retry-After`.
+- **Latency readout:** `run_bot` sends each `TurnMetrics` (timings only) as an RTVI server message
+  `{"type": "turn_metrics", ...}`; the client shows a per-turn table and the median.
+- **`run_bot(transport, brief, *, handle_sigint, max_call_secs)`** is shared by the dev runner and
+  the server.
+- Env: `CALLE_ALLOWED_ORIGINS` (CORS, default localhost:5173/7860), `CALLE_TRUST_PROXY`,
+  `CALLE_ICE_SERVERS` (JSON list of RTCIceServer dicts, also sent to the browser), and
+  `VITE_API_BASE_URL` for the client build when the API is on another origin.
+- Tests: `test_guardrails.py` (limits with a fake clock, one-time/expiring call ids, CallTimer),
+  `test_server.py` (API with fake LLM and fake WebRTC handler, incl. camelCase `requestData`).
+- Verified locally in the browser pane: UI loads, brief generation through the UI, call creation,
+  WebRTC connect, greeting in the transcript, countdown, hang-up frees the slot.
+- Live test 2026-10-21 (Chrome, demo brief): 7-turn call through the web app, bot audible, no
+  errors; VAD stop -> first audio 0.78 to 1.39 s (~1.17 s typical); a one-word "Wait." interrupted
+  mid-reply (first live confirmation of the interrupt-phrase rule). Not tried by hand: brief
+  upload in Chrome, the 422 brief-problems list, the 4th-call 429 (all covered by tests).
+- Fixed after that test (prompt only, not re-tested live): Alex greeted with "thanks for calling"
+  (persona and greeting now say it's an outbound call Alex placed); after "No. That's it. Thanks."
+  Alex kept pitching and promised "I'll set it up for you" (now: stop selling and say goodbye once
+  the caller declines or is done; never promise to do anything itself).
 
 ## Step 5: turn-taking
 - **Backchannel-proof barge-in.** Pipecat's default start strategies
@@ -252,6 +301,13 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
   stops passing LLM text to TTS after the second sentence.
 
 ## Gotchas
+- `SmallWebRTCRequest` is a plain dataclass, not a Pydantic model: using it as a FastAPI body
+  silently drops the `requestData` key the JS client sends. Parse the raw JSON with
+  `SmallWebRTCRequest.from_dict()` (as `server.py` does).
+- The SmallWebRTC JS transport calls `onTrackStarted(track)` for the bot's (remote) audio with
+  NO participant; only local tracks carry one. Attach audio when `!participant?.local`.
+- RTVI `bot-output` arrives twice per sentence (`spoken_status` "new", then "completed" after
+  the audio). The client shows only "completed", so the transcript matches what was heard.
 - Since Pipecat 1.3, `PipelineTask`/`PipelineRunner` are deprecated aliases; use `PipelineWorker`/`WorkerRunner`,
   and service options go through `Service.Settings(...)`, not constructor kwargs.
   Check the installed source under `.venv/lib/python3.12/site-packages/pipecat/` before trusting memory.

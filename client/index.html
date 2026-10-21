@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CALL-E</title>
+    <meta name="description" content="CALL-E: a real-time AI sales voice agent demo." />
+  </head>
+  <body>
+    <header class="site-header">
+      <h1>CALL-E</h1>
+      <p class="tagline">Give it your product. Then take a sales call from its AI rep.</p>
+    </header>
+
+    <main>
+      <!-- 1. Product material -> generated brief -->
+      <section class="card" aria-labelledby="product-title">
+        <h2 id="product-title"><span class="step">1</span> Your product</h2>
+        <form id="product-form">
+          <div class="row">
+            <label>Product name <input name="product_name" required maxlength="80" /></label>
+            <label>Company <input name="company_name" required maxlength="80" /></label>
+          </div>
+          <label>One-line description
+            <input name="description" maxlength="200" placeholder="e.g. AI meeting notes for sales teams" />
+          </label>
+          <label>Product sheet
+            <input type="file" name="file" id="file-input" />
+            <small id="file-hint" class="hint"></small>
+          </label>
+          <label>…or paste text
+            <textarea name="text" rows="5" placeholder="Features, pricing, FAQs, objections…"></textarea>
+          </label>
+          <label class="checkbox" id="web-option" hidden>
+            <input type="checkbox" name="use_web" value="true" /> Add web search results (marked "(web)" in the brief)
+          </label>
+          <div class="actions">
+            <button type="submit" id="generate-btn">Generate brief</button>
+            <button type="button" id="demo-btn" class="secondary">Use the demo brief</button>
+          </div>
+          <div id="product-status" class="status" role="status"></div>
+        </form>
+      </section>
+
+      <!-- 2. Editable brief -->
+      <section class="card" aria-labelledby="brief-title">
+        <h2 id="brief-title"><span class="step">2</span> Product brief</h2>
+        <p class="hint">This is everything the AI rep knows. Edit anything that's wrong. Items under
+          "Not covered" get "I'll have the team follow up".</p>
+        <textarea id="brief" rows="16" spellcheck="true" aria-describedby="brief-count"></textarea>
+        <div class="brief-meta"><span id="brief-count" class="hint"></span></div>
+        <ul id="brief-problems" class="problems"></ul>
+      </section>
+
+      <!-- 3. The call -->
+      <section class="card" aria-labelledby="call-title">
+        <h2 id="call-title"><span class="step">3</span> Call</h2>
+        <div class="call-bar">
+          <button id="call-btn">Start call</button>
+          <span id="call-status" class="pill">idle</span>
+          <span id="call-timer" class="timer" aria-label="Time left"></span>
+        </div>
+        <p id="call-note" class="hint"></p>
+        <div class="call-grid">
+          <div>
+            <h3>Transcript</h3>
+            <ol id="transcript" class="transcript" aria-live="polite"></ol>
+          </div>
+          <div>
+            <h3>Latency per turn</h3>
+            <table class="latency">
+              <thead>
+                <tr><th>#</th><th>Total</th><th>First token</th><th>Token → audio</th></tr>
+              </thead>
+              <tbody id="latency-rows"></tbody>
+            </table>
+            <p id="latency-summary" class="hint"></p>
+          </div>
+        </div>
+        <audio id="bot-audio" autoplay></audio>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      Use headphones so the rep doesn't hear itself. Calls are capped and rate-limited to keep the demo free.
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

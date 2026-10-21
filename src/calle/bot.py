@@ -17,6 +17,7 @@ env var (flag wins). Without either, the built-in Quillo DEMO_BRIEF is used.
 
 import argparse
 import os
+from dataclasses import asdict
 
 import certifi
 
@@ -51,12 +52,13 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
+from calle.call_timer import CallTimer
 from calle.config import ConfigError, load_settings
 from calle.filler import SlowResponseFiller
 from calle.knowledge import KnowledgeError, read_brief_file
 from calle.llm_recovery import LLMErrorRecovery
 from calle.log_redaction import install_log_redaction
-from calle.metrics import TurnLatencyObserver
+from calle.metrics import TurnLatencyObserver, TurnMetrics
 from calle.prompts import DEMO_BRIEF, GREETING_INSTRUCTION, build_system_prompt
 from calle.turn_taking import (
     IDLE_CHECKIN_SECS,
@@ -115,7 +117,18 @@ def add_brief_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, brief: str) -> None:
+async def run_bot(
+    transport: BaseTransport,
+    brief: str,
+    *,
+    handle_sigint: bool = False,
+    max_call_secs: float | None = None,
+) -> None:
+    """Run one call on `transport` until the client leaves (or the call cap hits).
+
+    Shared by the Pipecat dev runner (`bot()` below) and our own server
+    (`calle.server`), which also passes `max_call_secs`.
+    """
     settings = load_settings()
     system_prompt = build_system_prompt(brief)
     install_log_redaction(secrets=settings.secrets(), system_prompt=system_prompt)
@@ -192,12 +205,27 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, brief:
         ]
     )
 
+    latency = TurnLatencyObserver()
     worker = PipelineWorker(
         pipeline,
         # enable_metrics adds Pipecat's own per-service TTFB numbers to the
         # debug log, a useful cross-check for our TurnLatencyObserver.
         params=PipelineParams(enable_metrics=True),
-        observers=[TurnLatencyObserver()],
+        observers=[latency],
+    )
+
+    # Live latency readout: send each turn's timings to the browser as an
+    # RTVI server message (text stays out; the client has its own transcript).
+    @latency.event_handler("on_turn_metrics")
+    async def on_turn_metrics(observer: TurnLatencyObserver, metrics: TurnMetrics) -> None:
+        timings = {k: v for k, v in asdict(metrics).items() if k not in ("user_text", "bot_text")}
+        await worker.rtvi.send_server_message({"type": "turn_metrics", **timings})
+
+    # Hard cap on call length (public demo guardrail): wrap up, then end.
+    timer = (
+        CallTimer(max_call_secs, worker.queue_frames, lambda: runner.cancel())
+        if max_call_secs
+        else None
     )
 
     @transport.event_handler("on_client_connected")
@@ -211,15 +239,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, brief:
     async def on_client_ready(rtvi: RTVIProcessor) -> None:
         context.add_message({"role": "developer", "content": GREETING_INSTRUCTION})
         await worker.queue_frames([LLMRunFrame()])
+        if timer:
+            timer.start()
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport: BaseTransport, client: object) -> None:
         logger.info("Client disconnected")
         await runner.cancel()
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+    runner = WorkerRunner(handle_sigint=handle_sigint)
     await runner.add_workers(worker)
-    await runner.run()
+    try:
+        await runner.run()
+    finally:
+        if timer:
+            await timer.stop()
 
 
 async def bot(runner_args: RunnerArguments) -> None:
@@ -233,7 +267,7 @@ async def bot(runner_args: RunnerArguments) -> None:
     logger.info(f"Using brief: {label} ({len(brief):,} chars)")
 
     transport = await create_transport(runner_args, transport_params)
-    await run_bot(transport, runner_args, brief)
+    await run_bot(transport, brief, handle_sigint=runner_args.handle_sigint)
 
 
 if __name__ == "__main__":

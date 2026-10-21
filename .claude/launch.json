@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "calle-web",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "-m", "calle.server"],
+      "port": 7860
+    },
+    {
       "name": "calle-bot",
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "python", "-m", "calle.bot", "--brief", "briefs/quillo.md"],
