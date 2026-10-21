@@ -3,6 +3,7 @@
 Sits between the LLM and TTS. After the user's turn ends, if the LLM hasn't
 produced any text within `delay_secs`, push a filler TTSSpeakFrame. At most
 one filler per user turn; cancelled if the LLM answers or the user speaks.
+`skip_if` (e.g. "the caller asked us to hold") suppresses it for a turn.
 
 The filler is NOT stored in the conversation history: it's sent with
 `append_to_context=False`, so the TTS marks its text "don't record" and the
@@ -11,6 +12,7 @@ assistant aggregator skips it. The LLM never sees it as something it said.
 
 import asyncio
 import random
+from collections.abc import Callable
 
 from pipecat.frames.frames import (
     Frame,
@@ -32,10 +34,16 @@ FILLER_PHRASES: tuple[str, ...] = (
 
 
 class SlowResponseFiller(FrameProcessor):
-    def __init__(self, delay_secs: float, phrases: tuple[str, ...] = FILLER_PHRASES) -> None:
+    def __init__(
+        self,
+        delay_secs: float,
+        phrases: tuple[str, ...] = FILLER_PHRASES,
+        skip_if: Callable[[], bool] = lambda: False,
+    ) -> None:
         super().__init__()
         self._delay_secs = delay_secs
         self._phrases = phrases
+        self._skip_if = skip_if
         self._last_phrase = ""
         # True from the end of a user turn until the LLM answers or we fill.
         # The bot's opening greeting has no user turn, so it never gets a filler.
@@ -75,7 +83,7 @@ class SlowResponseFiller(FrameProcessor):
     async def _speak_after_delay(self) -> None:
         await asyncio.sleep(self._delay_secs)
         self._timer = None
-        if not self._awaiting_answer:
+        if not self._awaiting_answer or self._skip_if():
             return
         self._awaiting_answer = False  # one filler per user turn
         await self.push_frame(TTSSpeakFrame(self._pick_phrase(), append_to_context=False))

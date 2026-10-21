@@ -58,6 +58,12 @@ from calle.llm_recovery import LLMErrorRecovery
 from calle.log_redaction import install_log_redaction
 from calle.metrics import TurnLatencyObserver
 from calle.prompts import DEMO_BRIEF, GREETING_INSTRUCTION, build_system_prompt
+from calle.turn_taking import (
+    IDLE_CHECKIN_SECS,
+    INTERRUPT_MIN_WORDS,
+    CallPacing,
+    InterruptPhraseStartStrategy,
+)
 
 # Aura-2 "Thalia": clear, upbeat American English. A good fit for a
 # friendly sales rep. Other voices: https://developers.deepgram.com/docs/tts-models
@@ -139,9 +145,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, brief:
     context = LLMContext()
     # No vad_analyzer here: our VADProcessor upstream already emits VAD frames,
     # and the aggregator's turn logic consumes those. Passing one would run a
-    # second Silero model. Turn start stays at the defaults (VAD/transcript,
-    # which also interrupt the bot); turn stop uses the bundled Smart Turn v3
-    # model, same as the default but with a shorter silence fallback.
+    # second Silero model.
+    # Turn start: while Alex talks, the caller needs INTERRUPT_MIN_WORDS words
+    # (or an interrupt phrase like "wait") to cut in, so "mm-hmm" doesn't.
+    # Turn stop: the bundled Smart Turn v3 model with a shorter silence fallback.
     turn_analyzer = LocalSmartTurnAnalyzerV3(
         params=SmartTurnParams(stop_secs=SMART_TURN_STOP_SECS)
     )
@@ -149,10 +156,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, brief:
         context,
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=UserTurnStrategies(
-                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=turn_analyzer)]
+                start=[InterruptPhraseStartStrategy(min_words=INTERRUPT_MIN_WORDS)],
+                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=turn_analyzer)],
             ),
+            # Pipecat's idle timer: starts when Alex stops talking; CallPacing
+            # handles the event (check-ins, then goodbye).
+            user_idle_timeout=IDLE_CHECKIN_SECS,
         ),
     )
+    # "Hold on" handling and idle check-ins. queue_frames is looked up when
+    # called, so it can refer to the worker created below.
+    pacing = CallPacing(queue_frames=lambda frames: worker.queue_frames(frames))
+    pacing.attach(aggregators.user())
 
     pipeline = Pipeline(
         [
@@ -166,8 +181,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, brief:
             llm,
             # Retry a failed response once, then speak a fallback line.
             LLMErrorRecovery(llm, context),
-            # "One moment." if the LLM is slow; never stored in context.
-            SlowResponseFiller(FILLER_DELAY_SECS),
+            # "One moment." if the LLM is slow; never stored in context, and
+            # not while the caller has asked us to hold.
+            SlowResponseFiller(FILLER_DELAY_SECS, skip_if=lambda: pacing.on_hold),
             tts,
             transport.output(),  # bot audio back to the browser
             # After output, so the context records only what was actually

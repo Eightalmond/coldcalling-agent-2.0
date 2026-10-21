@@ -32,6 +32,9 @@ any dependency that needs a paid account.**
   - `log_redaction.py` — loguru patcher that hides API keys and the system prompt in logs
   - `llm_recovery.py` — `LLMErrorRecovery`: retry a failed LLM response once, then a spoken fallback
   - `filler.py` — `SlowResponseFiller`: "One moment." if no LLM text within `FILLER_DELAY_SECS`
+    (skipped while the caller asked to hold)
+  - `turn_taking.py` — Step 5: `InterruptPhraseStartStrategy` (backchannel-proof barge-in)
+    and `CallPacing` ("hold on" handling, idle check-ins, goodbye)
   - `echo.py` — step-2 `EchoProcessor`; no longer in the pipeline, kept for reference
 - `scripts/` — runnable utilities (`smoke_test.py` checks every API key;
   `make_brief.py` builds a brief from material)
@@ -50,7 +53,7 @@ any dependency that needs a paid account.**
    injected into the system prompt. No RAG for the MVP. Tavily web search is an
    optional enrichment toggle, available only when `TAVILY_API_KEY` is set.
    ✅ live-tested 2026-10-21 (backend + CLI only; upload UI is Step 6)
-5. **Interruptions / turn-taking** — barge-in, natural turn ends
+5. **Interruptions / turn-taking** — barge-in, natural turn ends 🚧 *built, pending live test*
 6. **Web UI + guardrails** — call duration cap, rate limit, latency readout
 7. **Polish** — README, architecture diagram, demo video
 
@@ -91,11 +94,13 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
 - **STT** emits `InterimTranscriptionFrame`s while you talk and `TranscriptionFrame`s
   for final text. Deepgram can emit several finals per utterance.
 - **User aggregator** (`LLMContextAggregatorPair(context).user()`) decides when the
-  turn is over (default stop strategy: bundled Smart Turn v3.2 ONNX model + a final
+  turn is over (stop strategy: bundled Smart Turn v3.2 ONNX model + a final
   transcript), broadcasts `UserStoppedSpeakingFrame`, appends the user message to the
-  `LLMContext` and pushes an `LLMContextFrame`. On user speech it broadcasts an
-  `InterruptionFrame`, so basic barge-in already works. It gets no `vad_analyzer`:
-  it reuses the VAD frames from our `VADProcessor` instead of running Silero twice.
+  `LLMContext` and pushes an `LLMContextFrame`. When a user turn *starts* it broadcasts
+  an `InterruptionFrame` (barge-in); our start strategy decides when that is (Step 5).
+  It gets no `vad_analyzer`: it reuses the VAD frames from our `VADProcessor` instead
+  of running Silero twice. Every frame reaches the stop strategies whether or not a
+  turn is active, so Smart Turn hears all the audio.
 - **LLM** (`GroqLLMService`) streams `LLMFullResponseStartFrame`, `LLMTextFrame`s,
   `LLMFullResponseEndFrame`. The system prompt is passed as
   `Settings(system_instruction=...)`, not as a context message.
@@ -111,6 +116,34 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
   total (VAD stop -> first audio). Turns with an empty transcript log only a
   DEBUG "VAD blip" line. A turn started by a transcript alone (no VAD stop of its
   own) is timed from "turn end" instead, and the log line says so.
+
+## Step 5: turn-taking
+- **Backchannel-proof barge-in.** Pipecat's default start strategies
+  (`VADUserTurnStartStrategy` + `TranscriptionUserTurnStartStrategy`) start a turn, and
+  so interrupt Alex, on any detected voice, including "mm-hmm" or a cough. Replaced by
+  `InterruptPhraseStartStrategy(min_words=INTERRUPT_MIN_WORDS)`, a subclass of Pipecat's
+  `MinWordsUserTurnStartStrategy`: while the bot speaks, a turn needs 3 words (counted
+  on interim transcripts); when it's silent, 1 word. Utterances that *start* with an
+  `INTERRUPT_PHRASES` entry ("wait", "stop", "hold on", "sorry", "no", ...) cut in
+  immediately. Short backchannels are cleared via `trigger_reset_aggregation()`, so they
+  don't leak into the next user message. Trade-off: barge-in now waits for the first
+  interim transcript (a few hundred ms) instead of VAD.
+- **Hold.** `CallPacing` reads the finished user turn (`on_user_turn_stopped`); a short
+  utterance (<= 6 words) matching "hold on / hang on / one second / give me a moment /
+  bear with me" sets `on_hold`, pushes `UserIdleTimeoutUpdateFrame(HOLD_IDLE_SECS=30)`,
+  and suppresses the filler. The LLM still says the acknowledgement (prompt rule). The
+  next user turn leaves hold and restores the 10 s timeout.
+- **Idle check-in.** `LLMUserAggregatorParams(user_idle_timeout=IDLE_CHECKIN_SECS=10)`;
+  Pipecat starts the timer when the bot stops speaking. On `on_user_turn_idle`,
+  `CallPacing` speaks "Are you still there?" (or a hold variant), up to
+  `MAX_IDLE_CHECKINS=2`, then `GOODBYE_TEXT` followed by `EndFrame` (queued behind the
+  goodbye audio, so it plays fully). Check-ins are stored in context (the caller heard
+  them). Any user turn resets the count.
+- Tests: `tests/test_turn_taking.py` runs Pipecat's real `LLMUserAggregator` with our
+  start strategy (mm-hmm / 2 words don't interrupt, 3 words and "wait" do) plus
+  phrase matching, `CallPacing` with a fake aggregator, and the filler's hold hook.
+- Not done (deliberately out of scope for now): interrupted-reply note in context,
+  merging split user turns, barge-in latency metric. See Open issues.
 
 ## Step 4: product knowledge
 ```
