@@ -49,16 +49,8 @@ entirely on free tiers.
 
 ### System
 
-```mermaid
-flowchart LR
-    B["Browser<br/>(Vite + TypeScript)"] -- "HTTP: brief, call token" --> S["FastAPI server<br/>calle.server"]
-    B <-- "WebRTC audio<br/>+ RTVI events" --> P["Pipecat voice pipeline<br/>calle.bot"]
-    S --> P
-    S -- "condense material" --> G[(Groq LLM)]
-    S -. "optional web search" .-> T[(Tavily)]
-    P <--> D[(Deepgram<br/>STT + TTS)]
-    P <--> G
-```
+<img width="1000" height="545" alt="Screenshot 2026-10-21 at 7 03 04 PM" src="https://github.com/user-attachments/assets/01e936a4-de4f-4ca5-a7d2-2fbd2730daf7" />
+
 
 1. **`POST /api/briefs`**: material in, structured brief out (one Groq request, validated, one
    automatic retry).
