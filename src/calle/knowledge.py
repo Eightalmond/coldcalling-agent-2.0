@@ -41,7 +41,7 @@ BRIEF_HEADINGS: tuple[str, ...] = (
     "Not covered",
 )
 
-# Condensing model. It can differ from the live-call model (bot.LLM_MODEL):
+# Condensing model. It can differ from the live-call model (llm_models.py):
 # this runs once before a call, so quality matters more than latency.
 BRIEF_MODEL = "openai/gpt-oss-120b"
 BRIEF_REASONING_EFFORT = "medium"

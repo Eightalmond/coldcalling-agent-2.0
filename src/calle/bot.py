@@ -56,6 +56,7 @@ from calle.call_timer import CallTimer
 from calle.config import ConfigError, load_settings
 from calle.filler import SlowResponseFiller
 from calle.knowledge import KnowledgeError, read_brief_file
+from calle.llm_models import resolve_llm
 from calle.llm_recovery import LLMErrorRecovery
 from calle.log_redaction import install_log_redaction
 from calle.metrics import TurnLatencyObserver, TurnMetrics
@@ -63,8 +64,8 @@ from calle.prompts import DEMO_BRIEF, GREETING_INSTRUCTION, build_system_prompt
 from calle.turn_taking import (
     IDLE_CHECKIN_SECS,
     INTERRUPT_MIN_WORDS,
+    BargeInStartStrategy,
     CallPacing,
-    InterruptPhraseStartStrategy,
 )
 
 # Aura-2 "Thalia": clear, upbeat American English. A good fit for a
@@ -72,11 +73,9 @@ from calle.turn_taking import (
 TTS_VOICE = "aura-2-thalia-en"
 STT_MODEL = "nova-3-general"
 
-# gpt-oss-20b is a reasoning model: it "thinks" before its first spoken word.
-# "low" is the lowest effort Groq accepts for gpt-oss (there is no "none").
-# The reasoning text arrives in a separate field that Pipecat doesn't speak.
-LLM_MODEL = "openai/gpt-oss-20b"
-LLM_REASONING_EFFORT = "low"
+# The LLM is chosen with CALLE_LLM_MODEL (presets in llm_models.py; default
+# gpt-oss-20b). Reasoning models "think" before their first spoken word; that
+# text arrives in a separate field Pipecat doesn't speak, but it costs latency.
 
 # Smart Turn's silence fallback (SmartTurnParams.stop_secs, Pipecat default 3).
 # When the model keeps judging the user "not finished", the turn still ends
@@ -141,17 +140,23 @@ async def run_bot(
         api_key=settings.deepgram_api_key,
         settings=DeepgramTTSService.Settings(voice=TTS_VOICE),
     )
+    preset = resolve_llm()
+    logger.info(f"LLM: {preset.model} (reasoning_effort={preset.reasoning_effort})")
     llm = GroqLLMService(
         api_key=settings.groq_api_key,
         # The system prompt goes in system_instruction rather than as the
         # first context message, so it isn't re-logged with the context on
         # every LLM call.
         settings=GroqLLMService.Settings(
-            model=LLM_MODEL,
-            reasoning_effort=LLM_REASONING_EFFORT,
+            model=preset.model,
+            reasoning_effort=preset.reasoning_effort,
             system_instruction=system_prompt,
         ),
     )
+    # Models whose chat template rejects the "developer" role (Qwen on Groq)
+    # get our greeting instruction as a "user" message instead. Pipecat reads
+    # this flag when it builds each request.
+    llm.supports_developer_role = preset.supports_developer_role
 
     # The conversation history. The aggregators write to it: the user one
     # when a user turn ends, the assistant one with what the bot actually said.
@@ -169,7 +174,7 @@ async def run_bot(
         context,
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=UserTurnStrategies(
-                start=[InterruptPhraseStartStrategy(min_words=INTERRUPT_MIN_WORDS)],
+                start=[BargeInStartStrategy(min_words=INTERRUPT_MIN_WORDS)],
                 stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=turn_analyzer)],
             ),
             # Pipecat's idle timer: starts when Alex stops talking; CallPacing
@@ -286,6 +291,7 @@ if __name__ == "__main__":
     pre_args, _ = pre_parser.parse_known_args()
     try:
         load_settings()
+        resolve_llm()
         _, brief_label = resolve_brief(pre_args.brief)
     except ConfigError as error:
         raise SystemExit(f"Config error: {error}") from None

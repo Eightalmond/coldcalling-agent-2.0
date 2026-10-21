@@ -67,6 +67,7 @@ from calle.knowledge import (
     load_material,
     validate_brief,
 )
+from calle.llm_models import LLM_ENV_VAR, resolve_llm
 from calle.prompts import DEMO_BRIEF
 
 from pipecat.transports.base_transport import TransportParams
@@ -316,8 +317,10 @@ def main() -> None:
     args = parser.parse_args()
     try:
         app = create_app()
+        preset = resolve_llm()  # fail fast on a bad CALLE_LLM_MODEL
     except ConfigError as error:
         raise SystemExit(f"Config error: {error}") from None
+    logger.info(f"LLM: {preset.model} (set {LLM_ENV_VAR} to change)")
     if not CLIENT_DIST.is_dir():
         logger.warning("client/dist not found: API only. Run `npm run build` in client/ for the UI.")
     uvicorn.run(app, host=args.host, port=args.port)

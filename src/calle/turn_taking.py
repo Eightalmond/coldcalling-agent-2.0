@@ -1,12 +1,14 @@
 """Step 5: turn-taking policies layered on Pipecat's user-turn machinery.
 
-1. Backchannel-proof barge-in (`InterruptPhraseStartStrategy`).
+1. Backchannel-proof barge-in (`BargeInStartStrategy`).
    By default any detected voice starts a user turn, and a user turn
    interrupts the bot, so "mm-hmm", "yeah" or a cough cut Alex off. Instead,
-   while Alex is speaking the caller must say INTERRUPT_MIN_WORDS words
-   (Pipecat's MinWordsUserTurnStartStrategy, counting interim transcripts),
+   while Alex is speaking the caller must say INTERRUPT_MIN_WORDS words,
    except for short interrupt phrases like "wait" or "hold on", which still
    cut in immediately. When Alex is silent, one word starts a turn as usual.
+   Words are counted across the whole utterance, not per transcript segment:
+   Deepgram often finalizes "Okay." and "I'll give" as separate short
+   segments, and counting each alone would discard real speech.
 
 2. Call pacing (`CallPacing`), driven by the user aggregator's events.
    - "Hold on" / "one second": the LLM acknowledges once (prompt rule), and
@@ -19,27 +21,34 @@
 
 import random
 import re
+import time
 from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     EndFrame,
     Frame,
     InterimTranscriptionFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
     UserIdleTimeoutUpdateFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregator,
     UserTurnStoppedMessage,
 )
 from pipecat.turns.types import ProcessFrameResult
-from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_start import BaseUserTurnStartStrategy
 
 # While Alex is speaking, this many words are needed to interrupt.
 INTERRUPT_MIN_WORDS = 3
+# Speech bursts separated by less silence than this count as one utterance.
+UTTERANCE_GAP_SECS = 1.0
 # ...unless the caller starts with one of these (matched as whole words).
 INTERRUPT_PHRASES: tuple[str, ...] = (
     "wait",
@@ -95,16 +104,51 @@ def is_hold_request(text: str) -> bool:
     return len(_words(text)) <= HOLD_MAX_WORDS and bool(_HOLD_RE.search(text))
 
 
-class InterruptPhraseStartStrategy(MinWordsUserTurnStartStrategy):
-    """MinWords start strategy that also lets short interrupt phrases through."""
+class BargeInStartStrategy(BaseUserTurnStartStrategy):
+    """Start a user turn on 1 word, or on INTERRUPT_MIN_WORDS while Alex talks.
+
+    Counts words over the whole utterance: final transcripts so far plus the
+    current interim one. Text from an utterance that never reached the
+    threshold (a backchannel) is discarded only when the *next* utterance
+    starts, so a final transcript that arrives late can't leak into it.
+    """
+
+    def __init__(self, *, min_words: int = INTERRUPT_MIN_WORDS, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._min_words = min_words
+        self._bot_speaking = False
+        self._finals: list[str] = []  # final transcripts of the current utterance
+        self._last_speech_end = 0.0  # monotonic time of the last VAD stop
+
+    async def handle_user_turn_started(self) -> None:
+        self._finals = []
 
     async def process_frame(self, frame: Frame) -> ProcessFrameResult:
-        if isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
-            if starts_with_interrupt_phrase(frame.text):
-                await self.trigger_user_turn_started()
-                return ProcessFrameResult.STOP
-        # Everything else (word counting, bot speaking state) is MinWords' job.
-        return await super().process_frame(frame)
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            if self._finals and time.monotonic() - self._last_speech_end > UTTERANCE_GAP_SECS:
+                # The previous utterance never reached the threshold and the
+                # caller has since paused: it was a backchannel. Drop it.
+                self._finals = []
+                await self.trigger_reset_aggregation()
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._last_speech_end = time.monotonic()
+        elif isinstance(frame, TranscriptionFrame):
+            self._finals.append(frame.text.strip())
+            return await self._check(" ".join(self._finals))
+        elif isinstance(frame, InterimTranscriptionFrame):
+            return await self._check(" ".join([*self._finals, frame.text.strip()]))
+        return ProcessFrameResult.CONTINUE
+
+    async def _check(self, utterance: str) -> ProcessFrameResult:
+        needed = self._min_words if self._bot_speaking else 1
+        if len(_words(utterance)) >= needed or starts_with_interrupt_phrase(utterance):
+            await self.trigger_user_turn_started()
+            return ProcessFrameResult.STOP
+        return ProcessFrameResult.CONTINUE
 
 
 QueueFrames = Callable[[list[Frame]], Awaitable[None]]

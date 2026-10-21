@@ -30,10 +30,12 @@ any dependency that needs a paid account.**
     validated brief with Groq (`build_brief`), `read_brief_file` for the bot
   - `metrics.py` — `TurnLatencyObserver`, per-turn latency logging (reused in later steps)
   - `log_redaction.py` — loguru patcher that hides API keys and the system prompt in logs
+  - `llm_models.py` — `CALLE_LLM_MODEL` presets (`gpt-oss` default, `qwen`): model, reasoning
+    effort, developer-role support; shared by the bot and `scripts/eval_persona.py`
   - `llm_recovery.py` — `LLMErrorRecovery`: retry a failed LLM response once, then a spoken fallback
   - `filler.py` — `SlowResponseFiller`: "One moment." if no LLM text within `FILLER_DELAY_SECS`
     (skipped while the caller asked to hold)
-  - `turn_taking.py` — Step 5: `InterruptPhraseStartStrategy` (backchannel-proof barge-in)
+  - `turn_taking.py` — Step 5: `BargeInStartStrategy` (backchannel-proof barge-in)
     and `CallPacing` ("hold on" handling, idle check-ins, goodbye)
   - `server.py` — Step 6: our FastAPI server (API + WebRTC signalling + serves the built UI)
   - `guardrails.py` — rate limits (`SlidingWindowLimiter`) and `CallRegistry` (one-time call ids,
@@ -50,6 +52,7 @@ any dependency that needs a paid account.**
   `make_brief.py` builds a brief from material)
 - `examples/quillo_material.md` — fake product sheet for testing, with deliberate gaps
   (no discount info, no SOC 2 / compliance, no SLA, no contract terms)
+- `docs/evals/` — logged evaluations (e.g. `2026-10-21-llm-persona-eval.md`: gpt-oss vs Qwen)
 - `tests/` — offline pytest suite (fake LLM, simulated frames; no keys, no network)
 - `briefs/` — generated briefs (git-ignored: may contain client material)
 - `.env.example` — required + optional keys; real keys live in `.env` (git-ignored)
@@ -178,13 +181,23 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
 - **Backchannel-proof barge-in.** Pipecat's default start strategies
   (`VADUserTurnStartStrategy` + `TranscriptionUserTurnStartStrategy`) start a turn, and
   so interrupt Alex, on any detected voice, including "mm-hmm" or a cough. Replaced by
-  `InterruptPhraseStartStrategy(min_words=INTERRUPT_MIN_WORDS)`, a subclass of Pipecat's
-  `MinWordsUserTurnStartStrategy`: while the bot speaks, a turn needs 3 words (counted
-  on interim transcripts); when it's silent, 1 word. Utterances that *start* with an
-  `INTERRUPT_PHRASES` entry ("wait", "stop", "hold on", "sorry", "no", ...) cut in
-  immediately. Short backchannels are cleared via `trigger_reset_aggregation()`, so they
-  don't leak into the next user message. Trade-off: barge-in now waits for the first
-  interim transcript (a few hundred ms) instead of VAD.
+  our own `BargeInStartStrategy(min_words=INTERRUPT_MIN_WORDS)` (on Pipecat's
+  `BaseUserTurnStartStrategy`): while the bot speaks, a turn needs 3 words; when it's
+  silent, 1 word. Utterances that *start* with an `INTERRUPT_PHRASES` entry ("wait",
+  "stop", "hold on", "sorry", "no", ...) cut in immediately. Words are counted over the
+  whole utterance (final transcripts so far + the current interim), and speech bursts less
+  than `UTTERANCE_GAP_SECS` = 1 s apart count as one utterance. A sub-threshold utterance
+  (a backchannel) is discarded via `trigger_reset_aggregation()` only when the *next*
+  utterance starts after a real gap, so its late final transcript can't leak into it.
+  Trade-off: barge-in waits for the first interim transcript (a few hundred ms) instead
+  of VAD.
+  - *Why not Pipecat's `MinWordsUserTurnStartStrategy`* (used until 2026-10-21): it counts
+    words per transcript segment and resets the aggregation after each short one. Deepgram
+    finalized "Okay." and "I'll give" as separate segments, so a live "Okay. I'll give it a
+    shot." reached the LLM as just "it a shot.".
+  - Test gotcha: pushing several transcripts at the same instant makes the turn-start
+    `InterruptionFrame` flush the still-queued ones; space them with `SleepFrame` like
+    real Deepgram segments.
 - **Hold.** `CallPacing` reads the finished user turn (`on_user_turn_stopped`); a short
   utterance (<= 6 words) matching "hold on / hang on / one second / give me a moment /
   bear with me" sets `on_hold`, pushes `UserIdleTimeoutUpdateFrame(HOLD_IDLE_SECS=30)`,
@@ -249,6 +262,13 @@ file/text -> load_material (.txt/.md/.pdf via pypdf; scanned PDF -> error)
 - Not yet re-tested live after these fixes.
 
 ## LLM model choice
+**Now switchable:** `CALLE_LLM_MODEL=gpt-oss|qwen` (default gpt-oss). Compare with
+`uv run python scripts/eval_persona.py [--runs N] [--out docs/evals/<name>.md]` (calls Groq,
+uses the free tier; paced to dodge throttling). The 2026-10-21 comparison and its open questions
+are logged in `docs/evals/2026-10-21-llm-persona-eval.md` (Qwen 15/18 vs gpt-oss 13/18 on rule
+checks, ~2x faster first token, but preview-only and not live-tested yet).
+
+Original notes:
 `openai/gpt-oss-20b` with `reasoning_effort="low"` (lowest Groq allows for gpt-oss;
 reasoning text is returned separately and never spoken, but it still delays the
 first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-sales;
@@ -291,6 +311,8 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
   the `errors=` counter and "VAD stop -> first token" before switching.
 
 ## Next up (owner's to-do)
+- **Discuss the LLM eval** (`docs/evals/2026-10-21-llm-persona-eval.md`, "Open questions"), and
+  live-test Qwen with `CALLE_LLM_MODEL=qwen` before changing the default.
 - **Live-test the persist-once rule** (first "no" -> needs question + tie-back; second "no" ->
   goodbye; explicit "stop / I have to go" -> immediate goodbye). Not tested yet.
 - **Review the frontend redesign** (done 2026-10-21, owner's choices: dark voice console, wizard

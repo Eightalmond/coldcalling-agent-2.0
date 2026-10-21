@@ -7,6 +7,9 @@ import pytest
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    TranscriptionFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
     BotStoppedSpeakingFrame,
     EndFrame,
     Frame,
@@ -38,7 +41,7 @@ from calle.turn_taking import (
     INTERRUPT_MIN_WORDS,
     MAX_IDLE_CHECKINS,
     CallPacing,
-    InterruptPhraseStartStrategy,
+    BargeInStartStrategy,
     is_hold_request,
     starts_with_interrupt_phrase,
 )
@@ -78,13 +81,13 @@ def test_not_hold_requests(text: str) -> None:
 # ---------------------------------------------------------------- barge-in with the real aggregator
 
 
-def run_user_aggregator(frames: list[Frame]) -> list[Frame]:
+def run_user_aggregator(frames: list[Frame], context: LLMContext | None = None) -> list[Frame]:
     """Push frames through Pipecat's LLMUserAggregator using our start strategy."""
     pair = LLMContextAggregatorPair(
-        LLMContext(),
+        context or LLMContext(),
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=UserTurnStrategies(
-                start=[InterruptPhraseStartStrategy(min_words=INTERRUPT_MIN_WORDS)],
+                start=[BargeInStartStrategy(min_words=INTERRUPT_MIN_WORDS)],
                 # A simple stop strategy, so the test doesn't load the Smart Turn model.
                 stop=[SpeechTimeoutUserTurnStopStrategy()],
             )
@@ -130,6 +133,60 @@ def test_one_word_starts_a_turn_when_bot_is_silent() -> None:
         [BotStartedSpeakingFrame(), BotStoppedSpeakingFrame(), interim("Hello")]
     )
     assert any(isinstance(f, UserStartedSpeakingFrame) for f in frames)
+
+
+def final(text: str) -> TranscriptionFrame:
+    return TranscriptionFrame(text, "user", "now")
+
+
+def user_messages(context: LLMContext) -> list[str]:
+    return [m["content"] for m in context.messages if m.get("role") == "user"]
+
+
+def test_words_count_across_segments_and_none_are_lost() -> None:
+    # Live-test regression: Deepgram finalized "Okay." and "I'll give" as
+    # separate segments; counted one by one, both were under 3 words and got
+    # discarded, so the context only received "it a shot."
+    context = LLMContext()
+    frames = run_user_aggregator(
+        [
+            BotStartedSpeakingFrame(),
+            VADUserStartedSpeakingFrame(),
+            # Spaced like real Deepgram segments. (Pushed all at once, the
+            # interruption at turn start would flush the still-queued ones.)
+            final("Okay."),
+            SleepFrame(0.2),
+            final("I'll give"),
+            SleepFrame(0.2),
+            final("it a shot."),
+            SleepFrame(0.1),
+            VADUserStoppedSpeakingFrame(),
+            SleepFrame(1.0),  # let the speech-timeout stop strategy end the turn
+        ],
+        context,
+    )
+    assert interrupted(frames)
+    assert user_messages(context) == ["Okay. I'll give it a shot."]
+
+
+def test_backchannel_is_dropped_and_does_not_leak_into_next_turn() -> None:
+    context = LLMContext()
+    run_user_aggregator(
+        [
+            BotStartedSpeakingFrame(),
+            VADUserStartedSpeakingFrame(),
+            final("Mm-hmm."),
+            VADUserStoppedSpeakingFrame(),
+            SleepFrame(1.2),  # a real pause: the next speech is a new utterance
+            BotStoppedSpeakingFrame(),
+            VADUserStartedSpeakingFrame(),
+            final("What about pricing?"),
+            VADUserStoppedSpeakingFrame(),
+            SleepFrame(1.0),
+        ],
+        context,
+    )
+    assert user_messages(context) == ["What about pricing?"]
 
 
 # ---------------------------------------------------------------- CallPacing
