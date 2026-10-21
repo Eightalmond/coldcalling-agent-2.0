@@ -299,10 +299,16 @@ def validate_brief(brief: str, max_chars: int = BRIEF_MAX_CHARS) -> list[str]:
 
 
 def _clean_reply(reply: str) -> str:
-    """Strip whitespace and a wrapping ```markdown fence if the model added one."""
+    """Strip a wrapping ```markdown fence and **bold** / __bold__ markers.
+
+    The prompt already forbids bold, but models sometimes add it anyway, and
+    the live-call LLM should see plain text it can speak.
+    """
     text = reply.strip()
     fenced = re.fullmatch(r"```[a-zA-Z]*\n(.*)\n```", text, flags=re.S)
-    return fenced.group(1).strip() if fenced else text
+    if fenced:
+        text = fenced.group(1).strip()
+    return re.sub(r"(\*\*|__)(.+?)\1", r"\2", text)
 
 
 # ---------------------------------------------------------------- main entry

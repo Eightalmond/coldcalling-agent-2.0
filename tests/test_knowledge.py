@@ -207,6 +207,16 @@ def test_code_fenced_reply_is_unwrapped() -> None:
     assert build_brief(product(), NO_WEB_KEY, llm=llm).brief == VALID_BRIEF
 
 
+def test_bold_markers_are_stripped() -> None:
+    bolded = VALID_BRIEF.replace(
+        '- "We already take notes ourselves."', '- **"We already take notes ourselves."**'
+    ).replace("Free plan", "__Free plan__")
+    assert "**" in bolded and "__" in bolded
+    brief = build_brief(product(), NO_WEB_KEY, llm=FakeLLM(bolded)).brief
+    assert "**" not in brief and "__" not in brief
+    assert brief == VALID_BRIEF
+
+
 # ---------------------------------------------------------------- web context
 
 

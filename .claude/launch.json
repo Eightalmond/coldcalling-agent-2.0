@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "calle-bot",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "-m", "calle.bot", "--brief", "briefs/quillo.md"],
+      "port": 7860
+    }
+  ]
+}

@@ -75,18 +75,25 @@ class TurnMetrics:
 
     Timings are None when the moment never happened, e.g. the user
     interrupted before any audio was produced.
+
+    `anchor` is the moment the timings count from: normally "VAD stop". A
+    turn can also start from a transcript alone (Pipecat's
+    TranscriptionUserTurnStartStrategy) with no VAD stop of its own, e.g.
+    when the user resumes right after a split turn; then we fall back to
+    "turn end", which leaves out the end-of-turn wait.
     """
 
     user_text: str
     bot_text: str
     interrupted: bool
-    vad_wait_ms: float
+    vad_wait_ms: float | None
     stt_ms: float | None
     turn_end_ms: float | None
     first_token_ms: float | None
     token_to_audio_ms: float | None
     total_ms: float | None
-    filler_ms: float | None = None  # VAD stop -> filler requested, if one was
+    filler_ms: float | None = None  # anchor -> filler requested, if one was
+    anchor: str = "VAD stop"
 
 
 @dataclass
@@ -233,17 +240,20 @@ class TurnLatencyObserver(BaseObserver):
         turn, self._turn = self._turn, None
         if turn is None:
             return
+        has_vad_stop = turn.vad_stop_at is not None
+        anchor_at = turn.vad_stop_at if has_vad_stop else turn.turn_end_at
         metrics = TurnMetrics(
             user_text=turn.user_text,
             bot_text="".join(turn.bot_parts).strip(),
             interrupted=interrupted,
-            vad_wait_ms=turn.vad_wait_secs * 1000,
+            vad_wait_ms=turn.vad_wait_secs * 1000 if has_vad_stop else None,
             stt_ms=_ms_between(turn.vad_stop_at, turn.stt_at),
-            turn_end_ms=_ms_between(turn.vad_stop_at, turn.turn_end_at),
-            first_token_ms=_ms_between(turn.vad_stop_at, turn.first_token_at),
+            turn_end_ms=_ms_between(anchor_at, turn.turn_end_at),
+            first_token_ms=_ms_between(anchor_at, turn.first_token_at),
             token_to_audio_ms=_ms_between(turn.first_token_at, turn.first_audio_at),
-            total_ms=_ms_between(turn.vad_stop_at, turn.first_audio_at),
-            filler_ms=_ms_between(turn.vad_stop_at, turn.filler_at),
+            total_ms=_ms_between(anchor_at, turn.first_audio_at),
+            filler_ms=_ms_between(anchor_at, turn.filler_at),
+            anchor="VAD stop" if has_vad_stop else "turn end",
         )
         log_turn(metrics)
         await self._call_event_handler("on_turn_metrics", metrics)
@@ -266,7 +276,7 @@ def log_turn(metrics: TurnMetrics) -> None:
         f"  bot  : {metrics.bot_text!r}\n"
         f"  vad wait {_fmt(metrics.vad_wait_ms)} | stt {_fmt(metrics.stt_ms, signed=True)}"
         f" | turn end {_fmt(metrics.turn_end_ms, signed=True)}\n"
-        f"  VAD stop -> first token {_fmt(metrics.first_token_ms)}"
+        f"  {metrics.anchor} -> first token {_fmt(metrics.first_token_ms)}"
         f" | first token -> first audio {_fmt(metrics.token_to_audio_ms)}"
         f" | total {_fmt(metrics.total_ms)}{filler}"
     )

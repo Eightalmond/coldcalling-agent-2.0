@@ -37,19 +37,19 @@ any dependency that needs a paid account.**
   `make_brief.py` builds a brief from material)
 - `examples/quillo_material.md` — fake product sheet for testing, with deliberate gaps
   (no discount info, no SOC 2 / compliance, no SLA, no contract terms)
-- `tests/` — offline pytest suite (fake LLM, no keys, no network)
+- `tests/` — offline pytest suite (fake LLM, simulated frames; no keys, no network)
 - `briefs/` — generated briefs (git-ignored: may contain client material)
 - `.env.example` — required + optional keys; real keys live in `.env` (git-ignored)
 
 ## Plan
 1. **Setup** — uv project, dependencies, config loading, smoke test ✅
 2. **STT + TTS echo bot** — hear the user, say it back ✅
-3. **LLM sales persona** — Groq-powered salesperson 🚧 *in progress*
+3. **LLM sales persona** — Groq-powered salesperson ✅
 4. **Product knowledge** — the user provides material (pasted text or uploaded
    `.txt`/`.md`/`.pdf`); it's condensed into a structured product brief that is
    injected into the system prompt. No RAG for the MVP. Tavily web search is an
    optional enrichment toggle, available only when `TAVILY_API_KEY` is set.
-   ✅ *complete pending the owner's live test* (backend + CLI only; upload UI is Step 6)
+   ✅ live-tested 2026-10-21 (backend + CLI only; upload UI is Step 6)
 5. **Interruptions / turn-taking** — barge-in, natural turn ends
 6. **Web UI + guardrails** — call duration cap, rate limit, latency readout
 7. **Polish** — README, architecture diagram, demo video
@@ -109,7 +109,8 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
   measuring never adds latency. Per turn it logs user text, bot text, VAD wait, STT
   delay, turn end, VAD stop -> first LLM token, first token -> first audio, and
   total (VAD stop -> first audio). Turns with an empty transcript log only a
-  DEBUG "VAD blip" line.
+  DEBUG "VAD blip" line. A turn started by a transcript alone (no VAD stop of its
+  own) is timed from "turn end" instead, and the log line says so.
 
 ## Step 4: product knowledge
 ```
@@ -136,9 +137,26 @@ file/text -> load_material (.txt/.md/.pdf via pypdf; scanned PDF -> error)
   never guess; "(web)" facts phrased softly ("I believe...").
 - Never logged: API keys, the material, the brief text. The bot logs only the brief's
   file name and length; `make_brief.py` prints only warnings, path and size.
-- Tests: `uv run pytest` (27 offline tests: each file type, scanned PDF, truncation
-  warning, heading validation + retry, LLM-error retry, web block labeling and the
-  no-key warning, injected instructions stay inside nonce delimiters).
+- `_clean_reply` strips code fences and `**bold**`/`__bold__` from the model's brief (the
+  prompt forbids bold, but gpt-oss-120b added it anyway on the first live run).
+- Tests: `uv run pytest` (`test_knowledge.py`: each file type, scanned PDF, truncation
+  warning, heading validation + retry, LLM-error retry, bold stripping, web block labeling
+  and the no-key warning, injected instructions stay inside nonce delimiters;
+  `test_metrics.py`: VAD-stop anchor, turn-end fallback, VAD blip, filler exclusion).
+
+## Live test 2026-10-21 (Quillo brief from examples/quillo_material.md)
+- Passed: pricing; discounts, SOC 2 and Salesforce all answered "not sure, the team will
+  follow up"; languages; "are you a real person" -> AI; "hold on" -> "Sure, take your
+  time."; barge-in stops the bot; a mid-sentence pause got Smart Turn INCOMPLETE and the
+  bot did not cut in. Greeting via the `developer` role works on live Groq. No LLM errors.
+- Latency: VAD stop -> first audio 0.9 to 1.45 s (~1.2 s typical); first token 540 to
+  1080 ms after VAD stop; first token -> first audio 340 to 480 ms. Filler never fired.
+- Fixed after the test: replies ran 33 to 50 words by chaining clauses with dashes
+  (prompt now: one point, hard 30-word cap, no dash/semicolon chaining); the bot offered a
+  demo not in the brief (prompt now: only next steps from the brief or a team follow-up);
+  turns started by a transcript alone logged `n/a` timings (metrics now fall back to the
+  turn-end anchor and label it); bold in generated briefs (now stripped in code).
+- Not yet re-tested live after these fixes.
 
 ## LLM model choice
 `openai/gpt-oss-20b` with `reasoning_effort="low"` (lowest Groq allows for gpt-oss;
@@ -192,9 +210,13 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
   the context holds fully spoken sentences only; a half-spoken sentence is dropped
   entirely, so the LLM doesn't know it said part of it. Not changed yet.
 - **`go on` / `hold on` handling** is prompt-only for now; Step 5 may need real
-  turn-taking logic (e.g. not answering "hold on" at all).
-- **Greeting `developer` role** on Groq is unverified against Groq's docs (Pipecat
-  treats Groq as supporting it); switch to `user` if it ever returns HTTP 400.
+  turn-taking logic (e.g. not answering "hold on" at all). "hold on" worked live; "go on"
+  hasn't been tested mid-explanation yet.
+- **Split turns.** A mid-sentence pause can split one utterance into two user turns (the
+  first LLM response is cancelled before any audio, so the caller doesn't hear it). The
+  context then holds two consecutive user messages. Revisit in Step 5.
+- **Reply length is prompt-enforced only.** If it keeps overrunning, add a processor that
+  stops passing LLM text to TTS after the second sentence.
 
 ## Gotchas
 - Since Pipecat 1.3, `PipelineTask`/`PipelineRunner` are deprecated aliases; use `PipelineWorker`/`WorkerRunner`,
