@@ -40,8 +40,12 @@ any dependency that needs a paid account.**
     concurrency cap); `call_timer.py` — `CallTimer`, spoken wrap-up + end at the call cap
   - `echo.py` — step-2 `EchoProcessor`; no longer in the pipeline, kept for reference
 - `client/` — Step 6 web client (Vite + vanilla TypeScript, `@pipecat-ai/client-js` 1.14.0 +
-  `@pipecat-ai/small-webrtc-transport` 1.11.0, pinned). `src/api.ts` (server API),
-  `src/call.ts` (one call: PipecatClient wrapper), `src/main.ts` (UI), `src/style.css`
+  `@pipecat-ai/small-webrtc-transport` 1.11.0, pinned). Dark "voice console" design, a 3-step
+  wizard (Product -> Brief -> Call). `src/api.ts` (server API), `src/call.ts` (one call:
+  PipecatClient wrapper, bot/mic tracks, turn state, mute, mic selection), `src/visualizer.ts`
+  (Web Audio `AnalyserNode` meters, the bot orb on a canvas, your mic level bars),
+  `src/latency.ts` (latency stats + per-turn SVG bar chart), `src/main.ts` (wizard + call
+  lifecycle), `src/style.css` (tokens on `:root`, one teal accent, rose for end/mute)
 - `scripts/` — runnable utilities (`smoke_test.py` checks every API key;
   `make_brief.py` builds a brief from material)
 - `examples/quillo_material.md` — fake product sheet for testing, with deliberate gaps
@@ -289,8 +293,11 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
 ## Next up (owner's to-do)
 - **Live-test the persist-once rule** (first "no" -> needs question + tie-back; second "no" ->
   goodbye; explicit "stop / I have to go" -> immediate goodbye). Not tested yet.
-- **Change the frontend design.** The Step 6 client (`client/`) is a functional first pass;
-  the owner wants a redesign. Ask about direction before starting.
+- **Review the frontend redesign** (done 2026-10-21, owner's choices: dark voice console, wizard
+  one step at a time, call screen = speaking visualizer + latency panel + mute/device picker, no
+  live transcript, vanilla TS). Verified in the browser pane at desktop and 375 px (no sideways
+  scroll), incl. a live call where the orb follows Alex's voice. Owner approved it after a live
+  14-turn call (2026-10-21).
 - **Deploy** (plan in "Step 6"): Vercel (client) + Hugging Face Spaces Docker (server) +
   Cloudflare TURN. Needs a Dockerfile and three free accounts.
 

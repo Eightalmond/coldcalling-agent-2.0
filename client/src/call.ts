@@ -18,11 +18,14 @@ export interface TurnMetrics {
   filler_ms: number | null;
 }
 
+export type BotState = "listening" | "thinking" | "speaking";
+
 export interface CallHandlers {
   onStatus: (status: string) => void;
   onReady: () => void;
-  onUserText: (text: string, final: boolean) => void;
-  onBotText: (text: string) => void;
+  onBotState: (state: BotState) => void;
+  onBotTrack: (track: MediaStreamTrack) => void;
+  onMicTrack: (track: MediaStreamTrack) => void;
   onMetrics: (metrics: TurnMetrics) => void;
   onEnded: () => void;
 }
@@ -50,22 +53,24 @@ export class Call {
       callbacks: {
         onTransportStateChanged: (state) => handlers.onStatus(state),
         onBotReady: () => handlers.onReady(),
-        // The bot's voice arrives as a remote audio track; play it. The
-        // SmallWebRTC transport reports remote tracks WITHOUT a participant
-        // (only local tracks carry one), so "not local" is the right test.
+        // The SmallWebRTC transport reports the bot's (remote) tracks WITHOUT a
+        // participant; only local tracks carry one, so "not local" = the bot.
         onTrackStarted: (track, participant) => {
-          if (track.kind === "audio" && !participant?.local) {
+          if (track.kind !== "audio") return;
+          if (participant?.local) {
+            handlers.onMicTrack(track);
+          } else {
             audioEl.srcObject = new MediaStream([track]);
             audioEl.play().catch((error) => console.warn("Bot audio playback blocked", error));
+            handlers.onBotTrack(track);
           }
         },
-        onUserInput: (data) => handlers.onUserText(data.text, data.final),
-        // Pipecat sends each sentence twice: "new" when it's queued for
-        // speech and "completed" once its audio has played. Show only the
-        // latter, so the transcript matches what the caller actually heard.
-        onBotOutput: (data) => {
-          if (data.spoken_status === "completed") handlers.onBotText(data.text);
-        },
+        // Turn-taking state for the status line: the user's turn ending means
+        // the bot is now working on a reply until its audio starts.
+        onUserStoppedSpeaking: () => handlers.onBotState("thinking"),
+        onUserStartedSpeaking: () => handlers.onBotState("listening"),
+        onBotStartedSpeaking: () => handlers.onBotState("speaking"),
+        onBotStoppedSpeaking: () => handlers.onBotState("listening"),
         onServerMessage: (data) => {
           if (data?.type === "turn_metrics") handlers.onMetrics(data as TurnMetrics);
         },
@@ -91,5 +96,25 @@ export class Call {
 
   async hangUp(): Promise<void> {
     await this.client.disconnect();
+  }
+
+  get micEnabled(): boolean {
+    return this.client.isMicEnabled;
+  }
+
+  setMicEnabled(enabled: boolean): void {
+    this.client.enableMic(enabled);
+  }
+
+  listMics(): Promise<MediaDeviceInfo[]> {
+    return this.client.getAllMics();
+  }
+
+  get selectedMicId(): string {
+    return this.client.selectedMic.deviceId ?? "";
+  }
+
+  useMic(deviceId: string): void {
+    this.client.updateMic(deviceId);
   }
 }

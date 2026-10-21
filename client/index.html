@@ -3,87 +3,134 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
     <title>CALL-E</title>
-    <meta name="description" content="CALL-E: a real-time AI sales voice agent demo." />
+    <meta name="description" content="CALL-E: a real-time AI sales voice agent. Give it your product, then take its call." />
   </head>
   <body>
-    <header class="site-header">
-      <h1>CALL-E</h1>
-      <p class="tagline">Give it your product. Then take a sales call from its AI rep.</p>
+    <header class="topbar">
+      <div class="brand"><span class="brand-dot" aria-hidden="true"></span>CALL-E</div>
+      <nav aria-label="Steps">
+        <ol class="stepper" id="stepper">
+          <li><button type="button" data-goto="product"><span>1</span>Product</button></li>
+          <li><button type="button" data-goto="brief"><span>2</span>Brief</button></li>
+          <li><button type="button" data-goto="call"><span>3</span>Call</button></li>
+        </ol>
+      </nav>
     </header>
 
     <main>
-      <!-- 1. Product material -> generated brief -->
-      <section class="card" aria-labelledby="product-title">
-        <h2 id="product-title"><span class="step">1</span> Your product</h2>
-        <form id="product-form">
-          <div class="row">
-            <label>Product name <input name="product_name" required maxlength="80" /></label>
-            <label>Company <input name="company_name" required maxlength="80" /></label>
+      <!-- Step 1: product material -->
+      <section class="screen" data-screen="product" aria-labelledby="product-title">
+        <div class="screen-head">
+          <p class="eyebrow">Step 1 of 3</p>
+          <h1 id="product-title">What should Alex sell?</h1>
+          <p class="lede">Upload a product sheet or paste your notes. CALL-E condenses it into a brief
+            that its AI sales rep, Alex, sticks to on the call.</p>
+        </div>
+        <form class="panel" id="product-form">
+          <div class="field-row">
+            <label class="field">Product name<input name="product_name" required maxlength="80" autocomplete="off" /></label>
+            <label class="field">Company<input name="company_name" id="company-input" required maxlength="80" autocomplete="off" /></label>
           </div>
-          <label>One-line description
-            <input name="description" maxlength="200" placeholder="e.g. AI meeting notes for sales teams" />
+          <label class="field">One-line description
+            <input name="description" maxlength="200" placeholder="e.g. AI meeting notes for sales teams" autocomplete="off" />
           </label>
-          <label>Product sheet
+          <label class="dropzone" id="dropzone">
             <input type="file" name="file" id="file-input" />
-            <small id="file-hint" class="hint"></small>
+            <span class="dropzone-title" id="file-name">Drop a product sheet here, or click to choose</span>
+            <span class="dropzone-hint" id="file-hint"></span>
           </label>
-          <label>…or paste text
+          <label class="field">…or paste text
             <textarea name="text" rows="5" placeholder="Features, pricing, FAQs, objections…"></textarea>
           </label>
-          <label class="checkbox" id="web-option" hidden>
-            <input type="checkbox" name="use_web" value="true" /> Add web search results (marked "(web)" in the brief)
+          <label class="toggle" id="web-option" hidden>
+            <input type="checkbox" name="use_web" value="true" />
+            <span>Enrich with web search <small>(facts marked "(web)", phrased cautiously)</small></span>
           </label>
           <div class="actions">
-            <button type="submit" id="generate-btn">Generate brief</button>
-            <button type="button" id="demo-btn" class="secondary">Use the demo brief</button>
+            <button type="button" class="btn ghost" id="demo-btn">Skip: use the demo product</button>
+            <button type="submit" class="btn primary" id="generate-btn">Generate brief</button>
           </div>
-          <div id="product-status" class="status" role="status"></div>
+          <p class="note" id="product-status" role="status"></p>
         </form>
       </section>
 
-      <!-- 2. Editable brief -->
-      <section class="card" aria-labelledby="brief-title">
-        <h2 id="brief-title"><span class="step">2</span> Product brief</h2>
-        <p class="hint">This is everything the AI rep knows. Edit anything that's wrong. Items under
-          "Not covered" get "I'll have the team follow up".</p>
-        <textarea id="brief" rows="16" spellcheck="true" aria-describedby="brief-count"></textarea>
-        <div class="brief-meta"><span id="brief-count" class="hint"></span></div>
-        <ul id="brief-problems" class="problems"></ul>
+      <!-- Step 2: editable brief -->
+      <section class="screen" data-screen="brief" aria-labelledby="brief-title" hidden>
+        <div class="screen-head">
+          <p class="eyebrow">Step 2 of 3</p>
+          <h1 id="brief-title">Check the brief</h1>
+          <p class="lede">This is everything Alex knows. Fix anything that's wrong. Questions about
+            items under "Not covered" get an honest "I'll have the team follow up".</p>
+        </div>
+        <div class="panel">
+          <textarea id="brief" class="brief-editor" rows="18" spellcheck="true" aria-label="Product brief" aria-describedby="brief-count"></textarea>
+          <div class="brief-meta">
+            <ul id="brief-problems" class="problems"></ul>
+            <span id="brief-count" class="counter"></span>
+          </div>
+          <div class="actions">
+            <button type="button" class="btn ghost" data-goto="product">Back</button>
+            <button type="button" class="btn primary" data-goto="call">Continue to call</button>
+          </div>
+        </div>
       </section>
 
-      <!-- 3. The call -->
-      <section class="card" aria-labelledby="call-title">
-        <h2 id="call-title"><span class="step">3</span> Call</h2>
-        <div class="call-bar">
-          <button id="call-btn">Start call</button>
-          <span id="call-status" class="pill">idle</span>
-          <span id="call-timer" class="timer" aria-label="Time left"></span>
-        </div>
-        <p id="call-note" class="hint"></p>
-        <div class="call-grid">
-          <div>
-            <h3>Transcript</h3>
-            <ol id="transcript" class="transcript" aria-live="polite"></ol>
+      <!-- Step 3: the call -->
+      <section class="screen call-screen" data-screen="call" aria-labelledby="call-title" hidden>
+        <h1 id="call-title" class="visually-hidden">Call</h1>
+        <div class="stage">
+          <div class="stage-top">
+            <span class="status-pill" id="call-status" data-state="idle">Ready</span>
+            <span class="timer" id="call-timer" aria-label="Time left"></span>
           </div>
-          <div>
-            <h3>Latency per turn</h3>
-            <table class="latency">
-              <thead>
-                <tr><th>#</th><th>Total</th><th>First token</th><th>Token → audio</th></tr>
-              </thead>
-              <tbody id="latency-rows"></tbody>
-            </table>
-            <p id="latency-summary" class="hint"></p>
+
+          <canvas id="orb" class="orb" aria-hidden="true"></canvas>
+          <div class="caller">
+            <strong>Alex</strong>
+            <span id="bot-company">AI sales rep</span>
           </div>
+          <p class="bot-state" id="bot-state" aria-live="polite">Ready when you are.</p>
+
+          <div class="you-meter">
+            <span>You</span>
+            <div class="level-bars" id="mic-level" aria-hidden="true"></div>
+          </div>
+
+          <div class="controls">
+            <button type="button" class="btn round" id="mute-btn" aria-pressed="false" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1A7 7 0 0 0 19 12h-2Z"/></svg>
+              <span id="mute-label">Mute</span>
+            </button>
+            <button type="button" class="btn call" id="call-btn">Start call</button>
+          </div>
+
+          <div class="devices">
+            <label>Mic<select id="mic-select" disabled><option>Default microphone</option></select></label>
+            <label id="speaker-field">Speaker<select id="speaker-select" disabled><option>Default speaker</option></select></label>
+          </div>
+          <p class="note" id="call-note" role="status"></p>
         </div>
-        <audio id="bot-audio" autoplay></audio>
+
+        <aside class="panel latency" aria-labelledby="latency-title">
+          <h2 id="latency-title">Latency</h2>
+          <p class="latency-sub">From you finishing a sentence to Alex's first sound.</p>
+          <dl class="stats">
+            <div><dt>Last turn</dt><dd id="lat-last">–</dd></div>
+            <div><dt>Median</dt><dd id="lat-median">–</dd></div>
+            <div><dt>Turns</dt><dd id="lat-count">0</dd></div>
+          </dl>
+          <svg id="lat-chart" class="chart" role="img" aria-label="Latency per turn"></svg>
+          <p class="breakdown" id="lat-breakdown"></p>
+        </aside>
       </section>
     </main>
 
-    <footer class="site-footer">
-      Use headphones so the rep doesn't hear itself. Calls are capped and rate-limited to keep the demo free.
+    <footer class="footer">
+      Use headphones so Alex doesn't hear itself. Calls are capped and rate-limited to keep this demo free.
     </footer>
+    <audio id="bot-audio" autoplay></audio>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

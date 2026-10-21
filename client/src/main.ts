@@ -1,36 +1,56 @@
-// CALL-E web client: product material -> editable brief -> voice call.
+// CALL-E web client: a three-step wizard (product -> brief -> call).
 
 import "./style.css";
 
 import { ApiError, createCall, generateBrief, getConfig, getDemoBrief, type Config } from "./api";
-import { Call, type TurnMetrics } from "./call";
+import { Call, type BotState } from "./call";
+import { LatencyPanel } from "./latency";
+import { LevelBars, Orb, TrackMeter } from "./visualizer";
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const $ = <T extends Element = HTMLElement>(selector: string) =>
+  document.querySelector(selector) as T;
 
-const productForm = $<HTMLFormElement>("product-form");
-const fileInput = $<HTMLInputElement>("file-input");
-const generateBtn = $<HTMLButtonElement>("generate-btn");
-const demoBtn = $<HTMLButtonElement>("demo-btn");
-const productStatus = $("product-status");
-const briefEl = $<HTMLTextAreaElement>("brief");
-const briefCount = $("brief-count");
-const briefProblems = $<HTMLUListElement>("brief-problems");
-const callBtn = $<HTMLButtonElement>("call-btn");
-const callStatus = $("call-status");
-const callTimer = $("call-timer");
-const callNote = $("call-note");
-const transcript = $<HTMLOListElement>("transcript");
-const latencyRows = $<HTMLTableSectionElement>("latency-rows");
-const latencySummary = $("latency-summary");
-const botAudio = $<HTMLAudioElement>("bot-audio");
+type Screen = "product" | "brief" | "call";
+
+const productForm = $<HTMLFormElement>("#product-form");
+const fileInput = $<HTMLInputElement>("#file-input");
+const dropzone = $<HTMLLabelElement>("#dropzone");
+const generateBtn = $<HTMLButtonElement>("#generate-btn");
+const productStatus = $("#product-status");
+const briefEl = $<HTMLTextAreaElement>("#brief");
+const briefCount = $("#brief-count");
+const briefProblems = $<HTMLUListElement>("#brief-problems");
+const callBtn = $<HTMLButtonElement>("#call-btn");
+const muteBtn = $<HTMLButtonElement>("#mute-btn");
+const callStatus = $("#call-status");
+const callTimer = $("#call-timer");
+const callNote = $("#call-note");
+const botStateEl = $("#bot-state");
+const micSelect = $<HTMLSelectElement>("#mic-select");
+const speakerSelect = $<HTMLSelectElement>("#speaker-select");
+const botAudio = $<HTMLAudioElement>("#bot-audio");
+
+const accentRgb = getComputedStyle(document.documentElement).getPropertyValue("--accent-rgb").trim();
+const orb = new Orb($<HTMLCanvasElement>("#orb"), accentRgb);
+const micBars = new LevelBars($("#mic-level"));
+const latency = new LatencyPanel(
+  $<SVGSVGElement>("#lat-chart"),
+  $("#lat-last"),
+  $("#lat-median"),
+  $("#lat-count"),
+  $("#lat-breakdown"),
+);
 
 let config: Config | null = null;
 let call: Call | null = null;
+let audioContext: AudioContext | null = null;
+let meters: TrackMeter[] = [];
 let countdown: number | undefined;
+let callStartedAt = 0;
 
 // ------------------------------------------------------------- helpers
 
-function setStatus(el: HTMLElement, text: string, kind: "info" | "error" | "ok" = "info") {
+function setNote(el: HTMLElement, text: string, kind: "info" | "error" | "ok" = "info") {
   el.textContent = text;
   el.dataset.kind = kind;
 }
@@ -51,7 +71,7 @@ function showProblems(problems: string[]) {
 function updateBriefCount() {
   const max = config?.brief_max_chars ?? 3000;
   const len = briefEl.value.length;
-  briefCount.textContent = `${len.toLocaleString()} / ${max.toLocaleString()} characters`;
+  briefCount.textContent = `${len.toLocaleString()} / ${max.toLocaleString()}`;
   briefCount.dataset.kind = len > max ? "error" : "info";
 }
 
@@ -61,34 +81,92 @@ function setBrief(text: string) {
   updateBriefCount();
 }
 
-const ms = (value: number | null) => (value == null ? "–" : `${Math.round(value)} ms`);
+const formatClock = (secs: number) =>
+  `${Math.floor(secs / 60)}:${String(Math.max(0, secs) % 60).padStart(2, "0")}`;
 
-// ------------------------------------------------------------- step 1: brief
+// ------------------------------------------------------------- wizard
+
+let current: Screen = "product";
+
+function show(screen: Screen) {
+  if (call) return; // no navigating away mid-call
+  if (screen !== "product" && !briefEl.value.trim()) screen = "product";
+  current = screen;
+  document.querySelectorAll<HTMLElement>("[data-screen]").forEach((el) => {
+    el.hidden = el.dataset.screen !== screen;
+  });
+  const order: Screen[] = ["product", "brief", "call"];
+  document.querySelectorAll<HTMLButtonElement>("#stepper button").forEach((button) => {
+    const step = button.dataset.goto as Screen;
+    button.setAttribute("aria-current", step === screen ? "step" : "false");
+    button.dataset.done = String(order.indexOf(step) < order.indexOf(screen));
+    // Steps after the first need a brief.
+    button.disabled = step !== "product" && !briefEl.value.trim();
+  });
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+document.addEventListener("click", (event) => {
+  const target = (event.target as HTMLElement).closest<HTMLElement>("[data-goto]");
+  if (target) show(target.dataset.goto as Screen);
+});
+
+// ------------------------------------------------------------- step 1: product
+
+function showFileName() {
+  const file = fileInput.files?.[0];
+  $("#file-name").textContent = file ? file.name : "Drop a product sheet here, or click to choose";
+  dropzone.dataset.filled = String(Boolean(file));
+}
+
+fileInput.addEventListener("change", showFileName);
+for (const type of ["dragenter", "dragover"]) {
+  dropzone.addEventListener(type, (event) => {
+    event.preventDefault();
+    dropzone.dataset.dragging = "true";
+  });
+}
+for (const type of ["dragleave", "drop"]) {
+  dropzone.addEventListener(type, () => (dropzone.dataset.dragging = "false"));
+}
+dropzone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  if (event.dataTransfer?.files.length) {
+    fileInput.files = event.dataTransfer.files;
+    showFileName();
+  }
+});
 
 productForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(productForm);
   if (!fileInput.files?.length) form.delete("file");
   generateBtn.disabled = true;
-  setStatus(productStatus, "Reading your material and writing the brief… (10–30 s)");
+  generateBtn.dataset.busy = "true";
+  setNote(productStatus, "Reading your material and writing the brief… this takes 10–30 s.");
   try {
     const result = await generateBrief(form);
     setBrief(result.brief);
+    $("#bot-company").textContent = String(form.get("company_name") || "AI sales rep");
     const notes = [result.used_web ? "Includes web results." : "", ...result.warnings].filter(Boolean);
-    setStatus(productStatus, ["Brief ready. Review it below.", ...notes].join(" "), "ok");
+    setNote(productStatus, notes.join(" "), "ok");
+    show("brief");
   } catch (error) {
-    setStatus(productStatus, describe(error), "error");
+    setNote(productStatus, describe(error), "error");
   } finally {
     generateBtn.disabled = false;
+    delete generateBtn.dataset.busy;
   }
 });
 
-demoBtn.addEventListener("click", async () => {
+$("#demo-btn").addEventListener("click", async () => {
   try {
     setBrief((await getDemoBrief()).brief);
-    setStatus(productStatus, "Loaded the demo brief (Quillo, a fictional AI meeting assistant).", "ok");
+    $("#bot-company").textContent = "Brightfern Labs";
+    setNote(productStatus, "");
+    show("brief");
   } catch (error) {
-    setStatus(productStatus, describe(error), "error");
+    setNote(productStatus, describe(error), "error");
   }
 });
 
@@ -96,109 +174,173 @@ briefEl.addEventListener("input", updateBriefCount);
 
 // ------------------------------------------------------------- step 3: call
 
-function addLine(who: "user" | "bot", text: string, interim = false): HTMLLIElement {
-  const li = document.createElement("li");
-  li.className = `line ${who}${interim ? " interim" : ""}`;
-  li.textContent = text;
-  transcript.append(li);
-  li.scrollIntoView({ block: "nearest" });
-  return li;
-}
+const BOT_STATE_TEXT: Record<BotState, string> = {
+  listening: "Listening…",
+  thinking: "Thinking…",
+  speaking: "Speaking",
+};
 
-let interimLine: HTMLLIElement | null = null;
-let botLine: HTMLLIElement | null = null;
-
-function onUserText(text: string, final: boolean) {
-  if (!text.trim()) return;
-  if (!interimLine) interimLine = addLine("user", text, true);
-  interimLine.textContent = text;
-  if (final) {
-    interimLine.classList.remove("interim");
-    interimLine = null;
-    botLine = null; // the next bot sentence starts a new bubble
-  }
-}
-
-function onBotText(text: string) {
-  if (!botLine) botLine = addLine("bot", text);
-  else botLine.textContent = `${botLine.textContent} ${text}`;
-}
-
-const totals: number[] = [];
-
-function onMetrics(m: TurnMetrics) {
-  const row = latencyRows.insertRow();
-  const cells = [
-    String(latencyRows.rows.length),
-    ms(m.total_ms) + (m.interrupted ? " ✂" : ""),
-    ms(m.first_token_ms),
-    ms(m.token_to_audio_ms),
-  ];
-  for (const text of cells) row.insertCell().textContent = text;
-  if (m.anchor !== "VAD stop") row.title = `Timed from ${m.anchor}`;
-  if (m.total_ms != null && m.anchor === "VAD stop") totals.push(m.total_ms);
-  if (totals.length) {
-    const sorted = [...totals].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    latencySummary.textContent = `Median from you stopping to the rep's first audio: ${Math.round(median)} ms over ${totals.length} turns.`;
-  }
+function setCallStatus(state: "idle" | "connecting" | "live" | "ended" | "error", text: string) {
+  callStatus.dataset.state = state;
+  callStatus.textContent = text;
 }
 
 function startCountdown(seconds: number) {
   const endsAt = Date.now() + seconds * 1000;
   const tick = () => {
     const left = Math.max(0, Math.round((endsAt - Date.now()) / 1000));
-    callTimer.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
+    callTimer.textContent = `${formatClock(left)} left`;
+    callTimer.dataset.warn = String(left <= 30);
     if (left === 0) window.clearInterval(countdown);
   };
   tick();
   countdown = window.setInterval(tick, 1000);
 }
 
-function resetCallUi() {
+async function fillDevices(active: Call) {
+  const mics = await active.listMics();
+  micSelect.replaceChildren(
+    ...mics.map((m, i) => new Option(m.label || `Microphone ${i + 1}`, m.deviceId)),
+  );
+  micSelect.value = active.selectedMicId || micSelect.value;
+  micSelect.disabled = mics.length < 2;
+
+  // Bot audio plays through our own <audio> element, so pick its output
+  // device with setSinkId (not supported everywhere, e.g. Safari).
+  if (!("setSinkId" in HTMLMediaElement.prototype)) {
+    $("#speaker-field").hidden = true;
+    return;
+  }
+  const speakers = (await navigator.mediaDevices.enumerateDevices()).filter(
+    (d) => d.kind === "audiooutput",
+  );
+  speakerSelect.replaceChildren(
+    ...speakers.map((s, i) => new Option(s.label || `Speaker ${i + 1}`, s.deviceId)),
+  );
+  speakerSelect.disabled = speakers.length < 2;
+}
+
+micSelect.addEventListener("change", () => call?.useMic(micSelect.value));
+speakerSelect.addEventListener("change", () => {
+  void (botAudio as HTMLAudioElement & { setSinkId(id: string): Promise<void> })
+    .setSinkId(speakerSelect.value)
+    .catch((error) => console.warn("Could not switch speaker", error));
+});
+
+muteBtn.addEventListener("click", () => {
+  if (!call) return;
+  const muted = call.micEnabled;
+  call.setMicEnabled(!muted);
+  muteBtn.setAttribute("aria-pressed", String(muted));
+  $("#mute-label").textContent = muted ? "Unmute" : "Mute";
+});
+
+function attachMeter(track: MediaStreamTrack): TrackMeter | null {
+  if (!audioContext) return null;
+  const meter = new TrackMeter(audioContext, track);
+  meters.push(meter);
+  return meter;
+}
+
+function teardownCall() {
   window.clearInterval(countdown);
-  callTimer.textContent = "";
+  orb.setMeter(null);
+  micBars.stop();
+  meters.forEach((m) => m.dispose());
+  meters = [];
   callBtn.textContent = "Start call";
+  callBtn.dataset.live = "false";
   callBtn.disabled = false;
-  callStatus.textContent = "idle";
-  interimLine = botLine = null;
+  muteBtn.disabled = true;
+  muteBtn.setAttribute("aria-pressed", "false");
+  $("#mute-label").textContent = "Mute";
+  micSelect.disabled = speakerSelect.disabled = true;
+  document.body.dataset.inCall = "false";
 }
 
 async function startCall() {
-  showProblems([]);
   callBtn.disabled = true;
-  setStatus(callNote, "Checking the brief…");
-  try {
-    const info = await createCall(briefEl.value);
-    transcript.replaceChildren();
-    latencyRows.replaceChildren();
-    latencySummary.textContent = "";
-    totals.length = 0;
-    setStatus(callNote, "Connecting… allow the microphone when asked.");
+  setCallStatus("connecting", "Checking brief");
+  setNote(callNote, "");
+  // Audio analysis needs an AudioContext created during a user gesture.
+  audioContext ??= new AudioContext();
+  void audioContext.resume();
 
-    call = new Call(info.call_id, config?.ice_servers ?? [], botAudio, {
-      onStatus: (status) => (callStatus.textContent = status),
-      onReady: () => {
-        setStatus(callNote, "Connected. The rep will greet you first.", "ok");
-        startCountdown(info.max_call_secs);
-        callBtn.textContent = "End call";
-        callBtn.disabled = false;
-      },
-      onUserText,
-      onBotText,
-      onMetrics,
-      onEnded: () => {
-        call = null;
-        resetCallUi();
-        setStatus(callNote, "Call ended.");
-      },
-    });
+  let info;
+  try {
+    info = await createCall(briefEl.value);
+  } catch (error) {
+    setCallStatus("idle", "Ready");
+    callBtn.disabled = false;
+    if (error instanceof ApiError && error.problems.length) {
+      show("brief");
+      showProblems(error.problems);
+      return;
+    }
+    setNote(callNote, describe(error), "error");
+    return;
+  }
+
+  latency.reset();
+  setCallStatus("connecting", "Connecting");
+  botStateEl.textContent = "Allow the microphone when your browser asks.";
+  document.body.dataset.inCall = "true";
+  micBars.start();
+
+  call = new Call(info.call_id, config?.ice_servers ?? [], botAudio, {
+    onStatus: (status) => {
+      if (status === "error") setCallStatus("error", "Error");
+    },
+    onReady: () => {
+      callStartedAt = Date.now();
+      setCallStatus("live", "Live");
+      botStateEl.textContent = "Alex is calling you…";
+      startCountdown(info.max_call_secs);
+      callBtn.textContent = "End call";
+      callBtn.dataset.live = "true";
+      callBtn.disabled = false;
+      muteBtn.disabled = false;
+      if (call) void fillDevices(call);
+    },
+    onBotState: (state) => {
+      botStateEl.textContent = BOT_STATE_TEXT[state];
+      botStateEl.dataset.state = state;
+    },
+    onBotTrack: (track) => orb.setMeter(attachMeter(track)),
+    onMicTrack: (track) => micBars.setMeter(attachMeter(track)),
+    onMetrics: (metrics) => latency.add(metrics),
+    onEnded: () => {
+      call = null;
+      const duration = callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
+      callStartedAt = 0;
+      teardownCall();
+      setCallStatus("ended", "Call ended");
+      callTimer.textContent = "";
+      botStateEl.textContent = "Call ended.";
+      delete botStateEl.dataset.state;
+      const median = latency.median;
+      setNote(
+        callNote,
+        [
+          `Lasted ${formatClock(duration)}`,
+          `${latency.count} turns`,
+          median != null ? `median latency ${(median / 1000).toFixed(2)} s` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+      callBtn.textContent = "Call again";
+    },
+  });
+
+  try {
     await call.start();
   } catch (error) {
     call = null;
-    resetCallUi();
-    if (error instanceof ApiError && error.problems.length) showProblems(error.problems);
-    setStatus(callNote, describe(error), "error");
+    teardownCall();
+    setCallStatus("error", "Couldn't connect");
+    botStateEl.textContent = "";
+    setNote(callNote, describe(error), "error");
   }
 }
 
@@ -214,22 +356,23 @@ callBtn.addEventListener("click", async () => {
 // ------------------------------------------------------------- init
 
 async function init() {
+  show("product");
+  orb.start(); // idles gently until a call gives it a voice to follow
   try {
     config = await getConfig();
     fileInput.accept = config.supported_files.join(",");
-    $("file-hint").textContent =
-      `${config.supported_files.join(", ")} up to ${Math.round(config.max_upload_bytes / 1048576)} MB`;
-    $("web-option").hidden = !config.web_search_available;
-    setStatus(
+    $("#file-hint").textContent =
+      `${config.supported_files.join(", ")} · up to ${Math.round(config.max_upload_bytes / 1048576)} MB`;
+    $("#web-option").hidden = !config.web_search_available;
+    setNote(
       callNote,
-      `Calls last up to ${Math.round(config.call_max_secs / 60)} minutes; ` +
-        `${config.calls_per_hour} calls per hour per visitor.`,
+      `Calls last up to ${Math.round(config.call_max_secs / 60)} minutes, ` +
+        `${config.calls_per_hour} per hour.`,
     );
-    setBrief((await getDemoBrief()).brief);
   } catch (error) {
-    setStatus(productStatus, describe(error), "error");
-    callBtn.disabled = true;
+    setNote(productStatus, describe(error), "error");
   }
+  show(current);
 }
 
 void init();
