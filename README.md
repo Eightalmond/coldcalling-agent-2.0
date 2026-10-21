@@ -240,10 +240,6 @@ examples/           fictional product sheet for testing
 - [ ] Live-test Qwen and decide the default model ([eval notes](docs/evals/2026-10-21-llm-persona-eval.md))
 - [ ] Demo video and screenshots
 
-## License
-
-[MIT](LICENSE)
-
 ## Acknowledgements
 
 Built on [Pipecat](https://github.com/pipecat-ai/pipecat) by Daily, with
