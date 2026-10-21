@@ -7,7 +7,8 @@ CALL-E is a ground-up rebuild of a 2024 project (Flask + Deepgram + GPT-3.5) as 
 streaming voice pipeline, built with [Pipecat](https://github.com/pipecat-ai/pipecat). It runs
 entirely on free tiers.
 
-> **Status:** works end to end locally. Public deployment (Vercel + Hugging Face Spaces) is next.
+<img width="887" height="680" alt="Screenshot 2026-10-21 at 5 36 59 PM" src="https://github.com/user-attachments/assets/cc456494-9191-412e-ac27-bf63a638ee1c" />
+
 
 ---
 
