@@ -334,5 +334,8 @@ def test_live_prompt_is_an_outbound_call_that_respects_no() -> None:
 
     prompt = build_system_prompt()
     assert "outbound" in prompt and "never thank them for calling" in prompt
-    assert "stop selling" in prompt and "Never promise to do anything yourself" in prompt
+    assert "The first time the caller declines" in prompt
+    assert "second time they decline" in prompt and "stop selling" in prompt
+    assert "asks you to stop" in prompt  # clear opt-outs end the call at once
+    assert "Never promise to do anything yourself" in prompt
     assert "outbound" in GREETING_INSTRUCTION and "Do not thank them for calling" in GREETING_INSTRUCTION

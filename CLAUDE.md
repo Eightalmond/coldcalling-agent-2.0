@@ -163,8 +163,12 @@ transport.input() -> VADProcessor(Silero) -> DeepgramSTTService
   upload in Chrome, the 422 brief-problems list, the 4th-call 429 (all covered by tests).
 - Fixed after that test (prompt only, not re-tested live): Alex greeted with "thanks for calling"
   (persona and greeting now say it's an outbound call Alex placed); after "No. That's it. Thanks."
-  Alex kept pitching and promised "I'll set it up for you" (now: stop selling and say goodbye once
-  the caller declines or is done; never promise to do anything itself).
+  Alex kept pitching and promised "I'll set it up for you" (now: never promise to do anything
+  itself). Owner's decision on declines: **persist once** (first "no" -> ask about their needs,
+  then tie the product to that need and invite them to reconsider; second "no" anywhere in the
+  call -> thank and goodbye), except an explicit opt-out ("stop", "I have to go", "don't call
+  me", annoyance) ends the call politely at once. Prompt-only; the LLM counts declines from the
+  conversation history.
 
 ## Step 5: turn-taking
 - **Backchannel-proof barge-in.** Pipecat's default start strategies
@@ -281,6 +285,14 @@ first token). Groq's non-reasoning Llama models are marked "Enterprise"/contact-
 - **If errors stay frequent:** try `qwen/qwen3.8-27b` with `reasoning_effort="none"`
   (non-reasoning, so also lower first-token latency; it's a preview model). Compare
   the `errors=` counter and "VAD stop -> first token" before switching.
+
+## Next up (owner's to-do)
+- **Live-test the persist-once rule** (first "no" -> needs question + tie-back; second "no" ->
+  goodbye; explicit "stop / I have to go" -> immediate goodbye). Not tested yet.
+- **Change the frontend design.** The Step 6 client (`client/`) is a functional first pass;
+  the owner wants a redesign. Ask about direction before starting.
+- **Deploy** (plan in "Step 6"): Vercel (client) + Hugging Face Spaces Docker (server) +
+  Cloudflare TURN. Needs a Dockerfile and three free accounts.
 
 ## Open issues
 - **Interrupted replies in context (sentence granularity).** Deepgram TTS has no word
