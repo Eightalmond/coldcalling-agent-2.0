@@ -3,7 +3,7 @@ name = "calle"
 version = "0.1.0"
 description = "CALL-E: a real-time AI sales voice agent built on Pipecat."
 authors = [
-    { name = "Eightalmond", email = "roshanrajiv04@gmail.com" }
+    { name = "Eightalmond", email = "47113990+Eightalmond@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
